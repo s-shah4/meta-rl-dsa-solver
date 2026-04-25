@@ -216,6 +216,8 @@ def run_trained_policy(request: Optional[RunTrainedPolicyRequest] = None) -> dic
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"run-trained-policy failed: {exc}") from exc
 
 
 @app.post("/generate-code")
@@ -235,6 +237,8 @@ def generate_code(request: GenerateCodeRequest) -> dict[str, Any]:
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"generate-code failed: {exc}") from exc
 
 
 @app.post("/mcp")

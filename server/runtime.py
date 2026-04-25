@@ -173,11 +173,61 @@ class SpaceModelRegistry:
                 return self._model, self._tokenizer, self._state.to_dict()
         if not allow_base_fallback:
             raise RuntimeError("No trained model is loaded yet.")
-        base_state = self.load_base_model()
+        try:
+            base_state = self.load_base_model()
+        except Exception as exc:
+            raise RuntimeError(f"Base model load failed: {exc}") from exc
         with self._lock:
             if self._base_model is None or self._base_tokenizer is None:
                 raise RuntimeError("No model is available for generation.")
             return self._base_model, self._base_tokenizer, base_state
+
+    def _base_generation_stack(self) -> tuple[Any, Any, dict[str, Any]]:
+        try:
+            base_state = self.load_base_model()
+        except Exception as exc:
+            raise RuntimeError(f"Base model load failed: {exc}") from exc
+        with self._lock:
+            if self._base_model is None or self._base_tokenizer is None:
+                raise RuntimeError("Base model could not be loaded for fallback generation.")
+            return self._base_model, self._base_tokenizer, base_state
+
+    def _generate_with_possible_base_fallback(
+        self,
+        *,
+        prompt: str,
+        max_new_tokens: int,
+        allow_base_fallback: bool,
+    ) -> tuple[str, dict[str, Any]]:
+        model, tokenizer, model_state = self._active_generation_stack(allow_base_fallback=allow_base_fallback)
+        try:
+            completion = generate_completion(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+            )
+            return completion, model_state
+        except Exception as exc:
+            if model_state.get("active_model_kind") == "trained" and allow_base_fallback:
+                fallback_model, fallback_tokenizer, fallback_state = self._base_generation_stack()
+                try:
+                    completion = generate_completion(
+                        model=fallback_model,
+                        tokenizer=fallback_tokenizer,
+                        prompt=prompt,
+                        max_new_tokens=max_new_tokens,
+                    )
+                except Exception as fallback_exc:
+                    raise RuntimeError(
+                        "Generation failed for both the trained model and the base-model fallback. "
+                        f"trained_error={exc}; base_error={fallback_exc}"
+                    ) from fallback_exc
+                fallback_state = dict(fallback_state)
+                fallback_state["fallback_reason"] = str(exc)
+                fallback_state["fallback_from"] = model_state.get("active_model_kind")
+                return completion, fallback_state
+            raise RuntimeError(f"Generation failed: {exc}") from exc
 
     def load_base_model(self) -> dict[str, Any]:
         torch, _, model_components = self._require_runtime_dependencies()
@@ -355,20 +405,19 @@ class SpaceModelRegistry:
         difficulty: str | None = None,
         max_new_tokens: int = 512,
     ) -> dict[str, Any]:
-        model, tokenizer, model_state = self._active_generation_stack(allow_base_fallback=False)
-
         env = AdaptEnvironment()
         observation = env.reset(problem_id=problem_id, difficulty=difficulty)
         trajectory: list[dict[str, Any]] = []
+        model_state: dict[str, Any] | None = None
 
         for step_index in range(1, MAX_STEPS_PER_EPISODE + 1):
             prompt = build_solver_prompt(observation.model_dump())
-            completion = generate_completion(
-                model=model,
-                tokenizer=tokenizer,
+            completion, current_model_state = self._generate_with_possible_base_fallback(
                 prompt=prompt,
                 max_new_tokens=max_new_tokens,
+                allow_base_fallback=True,
             )
+            model_state = current_model_state
             code = extract_code(completion)
             observation = env.step(AdaptAction(session_id=env.session_id, code=code))
             trajectory.append(
@@ -393,7 +442,7 @@ class SpaceModelRegistry:
             "difficulty": observation.difficulty,
             "steps": trajectory,
             "final_observation": observation.model_dump(),
-            "model": model_state,
+            "model": model_state or {},
         }
 
     def generate_code(
@@ -410,8 +459,6 @@ class SpaceModelRegistry:
         max_steps: int = 1,
         max_new_tokens: int = 512,
     ) -> dict[str, Any]:
-        model, tokenizer, model_state = self._active_generation_stack(allow_base_fallback=True)
-
         prompt = build_solver_prompt(
             {
                 "problem_id": problem_id,
@@ -425,11 +472,10 @@ class SpaceModelRegistry:
                 "feedback": feedback or "No previous attempt yet. Solve the problem directly.",
             }
         )
-        completion = generate_completion(
-            model=model,
-            tokenizer=tokenizer,
+        completion, model_state = self._generate_with_possible_base_fallback(
             prompt=prompt,
             max_new_tokens=max_new_tokens,
+            allow_base_fallback=True,
         )
         return {
             "problem_id": problem_id,

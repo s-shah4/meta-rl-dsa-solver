@@ -633,12 +633,51 @@ def generate_completion(
     except ImportError as exc:
         raise RuntimeError("`torch` is required to run generation for evaluation or trained-policy execution.") from exc
 
+    def _normalize_device(device_like: Any) -> Any | None:
+        if device_like is None:
+            return None
+        if getattr(device_like, "type", None) == "meta":
+            return None
+        if isinstance(device_like, int):
+            return torch.device(f"cuda:{device_like}")
+        if isinstance(device_like, str):
+            if device_like in {"disk", "meta"}:
+                return None
+            if device_like == "cuda":
+                return torch.device("cuda:0")
+            return torch.device(device_like)
+        return device_like
+
+    def _generation_device(candidate_model: Any) -> Any | None:
+        hf_device_map = getattr(candidate_model, "hf_device_map", None)
+        if not hf_device_map and hasattr(candidate_model, "base_model"):
+            hf_device_map = getattr(candidate_model.base_model, "hf_device_map", None)
+        if isinstance(hf_device_map, dict):
+            ordered_devices = list(dict.fromkeys(hf_device_map.values()))
+            for device_like in ordered_devices:
+                normalized = _normalize_device(device_like)
+                if normalized is not None and getattr(normalized, "type", None) != "cpu":
+                    return normalized
+            for device_like in ordered_devices:
+                normalized = _normalize_device(device_like)
+                if normalized is not None:
+                    return normalized
+
+        model_device = _normalize_device(getattr(candidate_model, "device", None))
+        if model_device is not None:
+            return model_device
+
+        try:
+            param_device = _normalize_device(next(candidate_model.parameters()).device)
+        except StopIteration:
+            param_device = None
+        return param_device
+
     rendered = render_prompt(tokenizer, prompt)
     inputs = tokenizer(rendered, return_tensors="pt")
-    device = getattr(model, "device", None)
-    if device is None:
-        device = next(model.parameters()).device
-    inputs = {key: value.to(device) for key, value in inputs.items()}
+    device = _generation_device(model)
+    if device is not None:
+        inputs = {key: value.to(device) for key, value in inputs.items()}
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
