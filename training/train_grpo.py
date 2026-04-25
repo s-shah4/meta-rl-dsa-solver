@@ -252,7 +252,7 @@ class GeneratorController:
     def resolve_prompt(self, prompt: str) -> dict[str, Any]:
         if prompt not in self.prompt_registry:
             raise KeyError("Prompt was not registered with the generator controller.")
-        return self.prompt_registry.pop(prompt)
+        return self.prompt_registry[prompt]
 
     def family_weights_for_difficulty(self, difficulty: str) -> dict[str, float] | None:
         if self.mode != "reward_aware":
