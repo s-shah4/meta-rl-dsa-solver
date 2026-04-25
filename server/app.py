@@ -46,7 +46,7 @@ class ResetRequest(BaseModel):
 
 
 class TrainRequest(BaseModel):
-    preset: str = "smoke"
+    preset: str = "overnight"
     model_name: Optional[str] = None
     output_dir: Optional[str] = None
     dataset_size: Optional[int] = None
@@ -76,6 +76,9 @@ class TrainRequest(BaseModel):
     disable_wandb: Optional[bool] = None
     trace_logging_enabled: Optional[bool] = None
     checkpoint_log_interval_steps: Optional[int] = None
+    save_steps: Optional[int] = None
+    save_total_limit: Optional[int] = None
+    upload_checkpoints_to_hub: Optional[bool] = None
     save_merged_model: Optional[bool] = None
 
 

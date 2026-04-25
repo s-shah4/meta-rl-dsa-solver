@@ -35,6 +35,7 @@ class FakeTorch:
 def main() -> None:
     l4_config = build_training_config("l4")
     smoke_config = build_training_config("smoke")
+    overnight_config = build_training_config("overnight")
 
     assert l4_config.model_name == "Qwen/Qwen2.5-3B-Instruct"
     assert l4_config.load_in_4bit is True
@@ -43,6 +44,15 @@ def main() -> None:
 
     assert smoke_config.load_in_4bit is False
     assert smoke_config.gradient_checkpointing is False
+    assert smoke_config.upload_checkpoints_to_hub is False
+
+    assert overnight_config.load_in_4bit is True
+    assert overnight_config.gradient_checkpointing is True
+    assert overnight_config.num_generations == 4
+    assert overnight_config.max_steps == 950
+    assert overnight_config.save_steps == 50
+    assert overnight_config.save_total_limit == 3
+    assert overnight_config.upload_checkpoints_to_hub is True
 
     bf16_policy = resolve_precision_policy(l4_config, FakeTorch(available=True, bf16_supported=True))
     assert bf16_policy["precision_mode"] == "bf16"

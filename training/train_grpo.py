@@ -65,6 +65,9 @@ class TrainingConfig:
     dataset_max_problems: int = 5000
     trace_logging_enabled: bool = True
     checkpoint_log_interval_steps: int = 10
+    save_steps: int = 50
+    save_total_limit: int = 3
+    upload_checkpoints_to_hub: bool = True
     save_merged_model: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +90,36 @@ TRAINING_PRESETS: dict[str, dict[str, Any]] = {
         "bf16": False,
         "output_dir": "outputs_smoke",
         "checkpoint_log_interval_steps": 2,
+        "save_steps": 2,
+        "save_total_limit": 2,
+        "upload_checkpoints_to_hub": False,
+    },
+    "overnight": {
+        "model_name": "Qwen/Qwen2.5-3B-Instruct",
+        "output_dir": "outputs_overnight",
+        "dataset_size": 1024,
+        "max_steps": 950,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 8,
+        "num_generations": 4,
+        "max_seq_length": 2048,
+        "max_prompt_length": 1024,
+        "max_completion_length": 384,
+        "learning_rate": 5e-6,
+        "lora_rank": 16,
+        "lora_alpha": 32,
+        "load_in_4bit": True,
+        "gradient_checkpointing": True,
+        "bf16": False,
+        "baseline_eval": False,
+        "disable_wandb": True,
+        "generator_mode": "reward_aware",
+        "use_dataset": False,
+        "trace_logging_enabled": True,
+        "checkpoint_log_interval_steps": 20,
+        "save_steps": 50,
+        "save_total_limit": 3,
+        "upload_checkpoints_to_hub": True,
     },
     "l4": {
         "model_name": "Qwen/Qwen2.5-3B-Instruct",
@@ -216,6 +249,9 @@ def namespace_to_config(args: argparse.Namespace) -> TrainingConfig:
         dataset_max_problems=args.dataset_max_problems,
         trace_logging_enabled=args.trace_logging_enabled,
         checkpoint_log_interval_steps=args.checkpoint_log_interval_steps,
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
+        upload_checkpoints_to_hub=args.upload_checkpoints_to_hub,
         save_merged_model=getattr(args, "save_merged_model", False),
     )
 
@@ -1035,6 +1071,7 @@ def run_training(
     *,
     run_id: str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    checkpoint_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if isinstance(config, argparse.Namespace):
         config = namespace_to_config(config)
@@ -1214,6 +1251,9 @@ def run_training(
         max_completion_length=config.max_completion_length,
         max_steps=config.max_steps,
         logging_steps=1,
+        save_strategy="steps",
+        save_steps=config.save_steps,
+        save_total_limit=config.save_total_limit,
         bf16=use_bf16,
         fp16=use_fp16,
         report_to=[],
@@ -1253,6 +1293,19 @@ def run_training(
                     "completed_steps": int(getattr(state, "global_step", 0)),
                     "total_steps": int(config.max_steps),
                     "current_epoch": float(getattr(state, "epoch", 0.0) or 0.0),
+                }
+            )
+
+        def on_save(self, args, state, control, **kwargs):  # type: ignore[override]
+            del control, kwargs
+            checkpoint_dir = Path(args.output_dir) / f"checkpoint-{int(getattr(state, 'global_step', 0))}"
+            if checkpoint_callback is None or not checkpoint_dir.exists():
+                return
+            checkpoint_callback(
+                {
+                    "step": int(getattr(state, "global_step", 0)),
+                    "checkpoint_dir": str(checkpoint_dir.resolve()),
+                    "output_dir": str(Path(args.output_dir).resolve()),
                 }
             )
 
@@ -1383,6 +1436,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-merged-model", action="store_true")
     parser.add_argument("--trace-logging-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--checkpoint-log-interval-steps", type=int, default=10)
+    parser.add_argument("--save-steps", type=int, default=50)
+    parser.add_argument("--save-total-limit", type=int, default=3)
+    parser.add_argument("--upload-checkpoints-to-hub", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--generator-mode",
         choices=["heuristic", "reward_aware"],

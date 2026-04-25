@@ -108,6 +108,8 @@ class TrainingJobState:
     baseline_summary: dict[str, Any] = field(default_factory=dict)
     trained_summary: dict[str, Any] = field(default_factory=dict)
     timing_summary: dict[str, Any] = field(default_factory=dict)
+    latest_uploaded_checkpoint_step: int | None = None
+    latest_uploaded_checkpoint_repo_path: str | None = None
     error: str | None = None
     traceback: str | None = None
 
@@ -561,6 +563,8 @@ class SpaceTrainingManager:
                 baseline_summary=payload.get("baseline_summary", {}),
                 trained_summary=payload.get("trained_summary", {}),
                 timing_summary=payload.get("timing_summary", {}),
+                latest_uploaded_checkpoint_step=payload.get("latest_uploaded_checkpoint_step"),
+                latest_uploaded_checkpoint_repo_path=payload.get("latest_uploaded_checkpoint_repo_path"),
                 error=payload.get("error"),
                 traceback=payload.get("traceback"),
             )
@@ -606,7 +610,7 @@ class SpaceTrainingManager:
 
     def start_training(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         request_payload = payload or {}
-        preset = request_payload.get("preset", "smoke")
+        preset = request_payload.get("preset", "overnight")
         overrides = {key: value for key, value in request_payload.items() if key != "preset"}
 
         with self._lock:
@@ -687,6 +691,38 @@ class SpaceTrainingManager:
         )
         return getattr(commit_info, "oid", None) or getattr(commit_info, "commit_hash", None) or "unknown"
 
+    def _upload_checkpoint_artifacts(self, *, checkpoint_dir: str, run_id: str, step: int) -> str:
+        token = os.getenv("HF_TOKEN")
+        repo_id = os.getenv("HF_MODEL_REPO_ID")
+        if not token or not repo_id:
+            raise RuntimeError("HF_TOKEN and HF_MODEL_REPO_ID are required to upload checkpoints.")
+
+        checkpoint_path = Path(checkpoint_dir)
+        if not checkpoint_path.exists():
+            raise RuntimeError(f"Checkpoint directory does not exist: {checkpoint_dir}")
+
+        try:
+            from huggingface_hub import HfApi
+        except ImportError as exc:
+            raise RuntimeError("Hugging Face Hub dependency is missing. Install `huggingface_hub`.") from exc
+
+        api = HfApi(token=token)
+        api.create_repo(repo_id=repo_id, repo_type="model", private=False, exist_ok=True)
+        api.upload_folder(
+            repo_id=repo_id,
+            repo_type="model",
+            folder_path=str(checkpoint_path),
+            commit_message=f"Update latest checkpoint for run {run_id} at step {step}",
+        )
+        history_commit = api.upload_folder(
+            repo_id=repo_id,
+            repo_type="model",
+            folder_path=str(checkpoint_path),
+            path_in_repo=f"checkpoints/{run_id}/checkpoint-{step:05d}",
+            commit_message=f"Archive checkpoint for run {run_id} at step {step}",
+        )
+        return getattr(history_commit, "oid", None) or getattr(history_commit, "commit_hash", None) or "unknown"
+
     def _cleanup_local_logs(self, log_dir: str | None) -> bool:
         if not log_dir:
             return False
@@ -696,10 +732,41 @@ class SpaceTrainingManager:
         shutil.rmtree(folder_path, ignore_errors=True)
         return not folder_path.exists()
 
+    def _checkpoint_progress_callback(self, run_id: str, config: TrainingConfig) -> Callable[[dict[str, Any]], None]:
+        def _callback(payload: dict[str, Any]) -> None:
+            if not config.upload_checkpoints_to_hub:
+                return
+            step = int(payload.get("step", 0) or 0)
+            checkpoint_dir = payload.get("checkpoint_dir")
+            if step <= 0 or not checkpoint_dir:
+                return
+            try:
+                uploaded_revision = self._upload_checkpoint_artifacts(
+                    checkpoint_dir=str(checkpoint_dir),
+                    run_id=run_id,
+                    step=step,
+                )
+                self._update_progress(
+                    {
+                        "uploaded_revision": uploaded_revision,
+                        "latest_uploaded_checkpoint_step": step,
+                        "latest_uploaded_checkpoint_repo_path": f"checkpoints/{run_id}/checkpoint-{step:05d}",
+                    }
+                )
+            except Exception as exc:
+                print(f"[warn] checkpoint upload failed for run {run_id} step {step}: {exc}", flush=True)
+
+        return _callback
+
     def _run_training_job(self, run_id: str, config: TrainingConfig) -> None:
         summary: dict[str, Any] | None = None
         try:
-            summary = run_training(config, run_id=run_id, progress_callback=self._update_progress)
+            summary = run_training(
+                config,
+                run_id=run_id,
+                progress_callback=self._update_progress,
+                checkpoint_callback=self._checkpoint_progress_callback(run_id, config),
+            )
             artifact_path = summary["output_dir"]
             uploaded_revision = self._upload_artifacts(artifact_path, run_id)
             logs_deleted = self._cleanup_local_logs(summary.get("logs_dir"))

@@ -36,6 +36,8 @@ def main() -> None:
     assert "finished_at" in train_status.json()
     assert "elapsed_seconds" in train_status.json()
     assert "timing_summary" in train_status.json()
+    assert "latest_uploaded_checkpoint_step" in train_status.json()
+    assert "latest_uploaded_checkpoint_repo_path" in train_status.json()
     assert "run_manifest_path" in train_status.json()
     assert "events_path" in train_status.json()
     assert "latest_checkpoint_path" in train_status.json()
@@ -82,6 +84,8 @@ def main() -> None:
         train = client.post("/train", json={})
         assert train.status_code == 200
         assert train.json()["status"] == "running"
+
+    assert server_app.TrainRequest().preset == "overnight"
 
     with patch.object(
         server_app.TRAINING_MANAGER,
