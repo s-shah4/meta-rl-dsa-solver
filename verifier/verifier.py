@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from verifier.complexity import analyze_code_complexity
 from verifier.metrics import compute_pass_rate
 from verifier.sandbox import run_code
 
 
 def verify(code: str, test_cases: list[dict[str, Any]] | list[tuple[str, str]]) -> tuple[float, dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    complexity = analyze_code_complexity(code)
 
     for index, test_case in enumerate(test_cases):
         if isinstance(test_case, dict):
@@ -58,6 +60,7 @@ def verify(code: str, test_cases: list[dict[str, Any]] | list[tuple[str, str]]) 
 
     return reward, {
         **metrics,
+        **complexity,
         "feedback": feedback,
         "results": results,
     }

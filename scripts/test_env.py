@@ -45,6 +45,7 @@ def main() -> None:
     assert correct.pass_rate == 1.0
     assert correct.execution_status == "completed"
     assert correct.done is True
+    assert correct.reward_components["efficiency_score"] >= 0.95
 
     observation = env.reset(problem_id="running_total", difficulty="easy")
     repair_1 = env.step(
@@ -80,6 +81,23 @@ def main() -> None:
     assert repair_2.pass_rate == 1.0
     assert repair_2.reward == 0.85
     assert "Previous attempt status:" in repair_2.feedback
+
+    observation = env.reset(problem_id="sum_even_numbers", difficulty="easy")
+    less_optimized = env.step(
+        AdaptAction(
+            code=(
+                "n=int(input())\n"
+                "nums=list(map(int,input().split()))\n"
+                "evens=[x for x in nums if x % 2 == 0]\n"
+                "print(sum(evens))"
+            )
+        )
+    )
+    print(less_optimized)
+    assert less_optimized.pass_rate == 1.0
+    assert less_optimized.done is False
+    assert less_optimized.reward < 1.0
+    assert "can still be optimized further" in less_optimized.feedback
 
     observation = env.reset(problem_id="sum_even_numbers", difficulty="easy")
     syntax = env.step(AdaptAction(code="def broken(:\n    pass"))

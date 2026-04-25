@@ -24,6 +24,7 @@ except ImportError:
 
 FORBIDDEN_IMPORTS = {"os", "pathlib", "shutil", "socket", "subprocess"}
 MAX_STEPS_PER_EPISODE = 3
+TARGET_EFFICIENCY_SCORE = 0.95
 
 
 class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
@@ -216,13 +217,17 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         hidden_pass_rate = float(metadata.get("hidden_pass_rate", metadata.get("pass_rate", 0.0)))
         visible_pass_rate = float(metadata.get("visible_pass_rate", 0.0))
         execution_status = str(metadata.get("execution_status", "completed"))
-        done = hidden_pass_rate == 1.0 or attempt_number >= MAX_STEPS_PER_EPISODE
+        efficiency_score = float(metadata.get("efficiency_score", 0.0))
+        efficiency_target_met = hidden_pass_rate == 1.0 and efficiency_score >= TARGET_EFFICIENCY_SCORE
+        done = efficiency_target_met or attempt_number >= MAX_STEPS_PER_EPISODE
         reward, reward_components = self._shape_reward(
             pass_rate=hidden_pass_rate,
             step_number=attempt_number,
             execution_status=execution_status,
             previous_pass_rate=previous_pass_rate,
             done=done,
+            efficiency_score=efficiency_score,
+            optimization_target_met=efficiency_target_met,
         )
         feedback = self._format_feedback(
             results=self.last_results,
@@ -231,6 +236,9 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
             execution_status=execution_status,
             hidden_pass_rate=hidden_pass_rate,
             visible_pass_rate=visible_pass_rate,
+            efficiency_score=efficiency_score,
+            optimization_hints=list(metadata.get("optimization_hints", [])),
+            optimization_target_met=efficiency_target_met,
         )
         observation = self._build_observation(
             reward=reward,
@@ -366,19 +374,28 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         execution_status: str,
         previous_pass_rate: float,
         done: bool,
+        efficiency_score: float,
+        optimization_target_met: bool,
     ) -> tuple[float, dict[str, float]]:
         step_discount = 1.0 if step_number == 1 else (0.85 if step_number == 2 else 0.70)
         progress_delta = max(0.0, float(pass_rate) - float(previous_pass_rate))
+        efficiency_score = max(0.0, min(float(efficiency_score), 1.0))
 
         if execution_status in {"timeout", "syntax_error", "safety_violation"}:
             reward = 0.0
         elif pass_rate == 1.0:
-            reward = compute_reward(
+            reward = round(
+                compute_reward(
                 pass_rate=pass_rate,
                 step_number=step_number,
                 execution_status=execution_status,
                 format_compliance=0.0,
+                )
+                * (0.6 + 0.4 * efficiency_score),
+                4,
             )
+            if not optimization_target_met and not done:
+                reward = min(reward, 0.94)
         elif done:
             reward = 0.0
         else:
@@ -386,6 +403,7 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
 
         return reward, {
             "correctness": round(float(pass_rate), 4),
+            "efficiency_score": round(efficiency_score, 4),
             "step_discount": round(step_discount, 4),
             "progress_delta": round(progress_delta, 4),
             "reward": round(float(reward), 4),
@@ -399,12 +417,16 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         execution_status: str,
         hidden_pass_rate: float,
         visible_pass_rate: float,
+        efficiency_score: float,
+        optimization_hints: list[str],
+        optimization_target_met: bool,
     ) -> str:
         lines = [
             f"Attempt {attempt_number}/{MAX_STEPS_PER_EPISODE}.",
             f"Previous attempt status: {previous_status}.",
             f"Current execution status: {execution_status}.",
             f"Hidden pass rate: {hidden_pass_rate:.2f}. Visible pass rate: {visible_pass_rate:.2f}.",
+            f"Efficiency score: {efficiency_score:.2f}.",
         ]
 
         failed_tests = self._summarize_failed_tests(results)
@@ -412,9 +434,17 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
             lines.append("Failed tests:")
             lines.extend(failed_tests)
         elif hidden_pass_rate == 1.0:
-            lines.append("All hidden tests passed.")
+            if optimization_target_met:
+                lines.append("All hidden tests passed and the solution met the optimization target.")
+            else:
+                lines.append("All hidden tests passed, but the solution can still be optimized further.")
         else:
             lines.append("No failing test details were available.")
+
+        if optimization_hints and hidden_pass_rate == 1.0 and not optimization_target_met:
+            lines.append("Optimization hints:")
+            for hint in optimization_hints:
+                lines.append(f"- {hint}")
 
         return "\n".join(lines)
 

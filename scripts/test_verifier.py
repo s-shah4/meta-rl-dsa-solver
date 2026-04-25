@@ -30,6 +30,13 @@ nums = list(map(int, input().split()))
 print(sum(nums))
 """
 
+less_optimized_code = """
+n = int(input())
+nums = list(map(int, input().split()))
+evens = [x for x in nums if x % 2 == 0]
+print(sum(evens))
+"""
+
 invalid_output_code = """
 n = int(input())
 input()
@@ -50,6 +57,7 @@ print(nums[n])
 for name, code in [
     ("correct", correct_code),
     ("wrong", wrong_code),
+    ("less_optimized", less_optimized_code),
     ("invalid_output", invalid_output_code),
     ("timeout", timeout_code),
     ("runtime_error", runtime_error_code),
@@ -65,3 +73,9 @@ for name, code in [
     print("Invalid output:", info["invalid_output_count"])
     print("Wrong answers:", info["wrong_answer_count"])
     print("Status:", info["execution_status"])
+    print("Efficiency:", info.get("efficiency_score"))
+
+reward_optimal, info_optimal = verify(correct_code, test_cases)
+reward_less_optimal, info_less_optimal = verify(less_optimized_code, test_cases)
+assert info_optimal["efficiency_score"] > info_less_optimal["efficiency_score"]
+assert info_less_optimal["complexity_signals"]["list_comprehensions"] > 0

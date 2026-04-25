@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY . .
 
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e ".[train]"
 
 EXPOSE 7860
 
