@@ -4,5 +4,5 @@ fastapi>=0.104.0
 uvicorn>=0.24.0
 pydantic>=2.0.0
 huggingface_hub>=0.30.0
-transformers>=4.48.0
-peft>=0.14.0
+transformers>=4.51.3,<5.7
+peft>=0.18.0,<0.20
