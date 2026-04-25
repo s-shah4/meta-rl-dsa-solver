@@ -11,6 +11,7 @@ from typing import Any, Callable
 from env.adapt_env import AdaptEnvironment, MAX_STEPS_PER_EPISODE
 from env.generator import DIFFICULTY_LABELS, GeneratorAgent
 from models import AdaptAction
+from training.trace_logging import TraceArtifactLogger
 
 SYSTEM_PROMPT = """You are the Solver Agent for ADAPT.
 Write only runnable Python code.
@@ -44,6 +45,8 @@ class TrainingConfig:
     wandb_run_name: str | None = None
     generator_mode: str = "reward_aware"
     non_deterministic_generator: bool = False
+    trace_logging_enabled: bool = True
+    checkpoint_log_interval_steps: int = 10
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,6 +63,7 @@ TRAINING_PRESETS: dict[str, dict[str, Any]] = {
         "baseline_eval": False,
         "disable_wandb": True,
         "output_dir": "outputs_smoke",
+        "checkpoint_log_interval_steps": 2,
     },
     "default": {},
 }
@@ -156,6 +160,8 @@ def namespace_to_config(args: argparse.Namespace) -> TrainingConfig:
         wandb_run_name=args.wandb_run_name,
         generator_mode=args.generator_mode,
         non_deterministic_generator=args.non_deterministic_generator,
+        trace_logging_enabled=args.trace_logging_enabled,
+        checkpoint_log_interval_steps=args.checkpoint_log_interval_steps,
     )
 
 
@@ -329,12 +335,27 @@ class TrainingLogger:
     use_wandb: bool = True
     wandb_project: str = "adapt-dsa-tutor"
     wandb_run_name: str | None = None
+    run_id: str | None = None
+    training_config: dict[str, Any] = field(default_factory=dict)
+    model_identifiers: dict[str, Any] = field(default_factory=dict)
+    trace_logging_enabled: bool = True
+    checkpoint_log_interval_steps: int = 10
     rows: list[dict[str, Any]] = field(default_factory=list)
     global_step: int = 0
     _wandb_run: Any = field(default=None, init=False, repr=False)
+    _trace_logger: TraceArtifactLogger | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.trace_logging_enabled and self.run_id:
+            self._trace_logger = TraceArtifactLogger(
+                run_id=self.run_id,
+                output_dir=self.output_dir,
+                training_config=dict(self.training_config),
+                model_identifiers=dict(self.model_identifiers),
+                system_prompt=SYSTEM_PROMPT,
+                checkpoint_interval_steps=int(max(self.checkpoint_log_interval_steps, 1)),
+            )
         if not self.use_wandb:
             return
         try:
@@ -381,9 +402,36 @@ class TrainingLogger:
         if extra:
             row.update(extra)
         self.rows.append(row)
+        if self._trace_logger is not None:
+            self._trace_logger.log_event(
+                {
+                    "phase": phase,
+                    "step": self.global_step,
+                    "train_episode_index": extra.get("train_episode_index") if extra else None,
+                    "problem_id": row.get("problem_id"),
+                    "problem_family": row.get("problem_family"),
+                    "difficulty": row.get("difficulty_tier"),
+                    "teacher_prompt": row.get("teacher_prompt"),
+                    "solver_completion": row.get("solver_completion"),
+                    "extracted_code": row.get("extracted_code"),
+                    "reward": row.get("episode_reward"),
+                    "pass_rate": row.get("pass_rate"),
+                    "visible_pass_rate": row.get("visible_pass_rate"),
+                    "execution_status": row.get("execution_status"),
+                    "efficiency_score": row.get("efficiency_score"),
+                    "optimization_hints": row.get("optimization_hints", []),
+                    "feedback": row.get("feedback"),
+                }
+            )
         if self._wandb_run is not None:
             self._wandb_run.log(row, step=self.global_step)
         self.global_step += 1
+
+    def record_progress(self, updates: dict[str, Any]) -> dict[str, Any]:
+        if self._trace_logger is None:
+            return {}
+        self._trace_logger.record_progress(updates)
+        return self._trace_logger.artifact_paths()
 
     def write_csv(self) -> Path:
         output_path = self.output_dir / "reward_curve.csv"
@@ -402,9 +450,35 @@ class TrainingLogger:
         if self._wandb_run is not None:
             self._wandb_run.finish()
 
+    def finalize_trace_artifacts(
+        self,
+        *,
+        reward_curve_csv: Path | None = None,
+        final_metrics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if self._trace_logger is None:
+            return {}
+        self._trace_logger.finalize(reward_curve_csv=reward_curve_csv, final_metrics=final_metrics)
+        return self._trace_logger.artifact_paths()
+
 
 def build_dataset(size: int, controller: GeneratorController, curriculum: CurriculumManager) -> GeneratorRolloutDataset:
     return GeneratorRolloutDataset(size=size, controller=controller, curriculum=curriculum)
+
+
+def extract_optimization_hints(feedback: str) -> list[str]:
+    lines = [line.strip() for line in feedback.splitlines()]
+    hints: list[str] = []
+    capture = False
+    for line in lines:
+        if line == "Optimization hints:":
+            capture = True
+            continue
+        if capture and line.startswith("- "):
+            hints.append(line[2:])
+        elif capture and line:
+            break
+    return hints
 
 
 def build_reward_func(
@@ -453,6 +527,13 @@ def build_reward_func(
                 extra={
                     "generator_reward": round(float(observation.generator_reward_signal), 4),
                     "problem_id": problem["problem_id"],
+                    "teacher_prompt": prompt,
+                    "solver_completion": completion,
+                    "extracted_code": extract_code(completion),
+                    "feedback": observation.feedback,
+                    "efficiency_score": observation.reward_components.get("efficiency_score"),
+                    "optimization_hints": extract_optimization_hints(observation.feedback),
+                    "train_episode_index": int(controller.history["episode_index"]),
                 },
             )
             if progress_callback is not None:
@@ -552,6 +633,9 @@ def run_policy_evaluation(
             session_id=env.session_id,
             generator_mode=generator_mode,
         )
+        last_prompt = ""
+        last_completion = ""
+        last_code = ""
 
         for _ in range(MAX_STEPS_PER_EPISODE):
             prompt = build_solver_prompt(observation.model_dump())
@@ -561,10 +645,13 @@ def run_policy_evaluation(
                 prompt=prompt,
                 max_new_tokens=max_new_tokens,
             )
+            last_prompt = prompt
+            last_completion = completion
+            last_code = extract_code(completion)
             observation = env.step(
                 AdaptAction(
                     session_id=env.session_id,
-                    code=extract_code(completion),
+                    code=last_code,
                 )
             )
             if observation.done:
@@ -591,6 +678,13 @@ def run_policy_evaluation(
             extra={
                 "generator_reward": round(float(observation.generator_reward_signal), 4),
                 "problem_id": problem["problem_id"],
+                "teacher_prompt": last_prompt,
+                "solver_completion": last_completion,
+                "extracted_code": last_code,
+                "feedback": observation.feedback,
+                "efficiency_score": observation.reward_components.get("efficiency_score"),
+                "optimization_hints": extract_optimization_hints(observation.feedback),
+                "train_episode_index": int(controller.history["episode_index"]),
             },
         )
 
@@ -615,10 +709,16 @@ def print_evaluation_summary(baseline: dict[str, Any], trained: dict[str, Any]) 
 def run_training(
     config: TrainingConfig | argparse.Namespace,
     *,
+    run_id: str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if isinstance(config, argparse.Namespace):
         config = namespace_to_config(config)
+
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError("Training requires `torch` to be installed.") from exc
 
     try:
         from trl import GRPOConfig, GRPOTrainer
@@ -634,13 +734,20 @@ def run_training(
 
     PatchFastRL("GRPO", FastLanguageModel)
 
+    use_cuda = torch.cuda.is_available()
+    use_bf16 = bool(config.bf16) or (use_cuda and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported())
+    model_dtype = torch.bfloat16 if use_bf16 else (torch.float16 if use_cuda else torch.float32)
+
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=config.model_name,
         max_seq_length=config.max_seq_length,
+        dtype=model_dtype,
         load_in_4bit=not config.disable_4bit,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if hasattr(model, "config"):
+        model.config.torch_dtype = model_dtype
 
     model = FastLanguageModel.get_peft_model(
         model,
@@ -661,22 +768,36 @@ def run_training(
         use_wandb=not config.disable_wandb,
         wandb_project=config.wandb_project,
         wandb_run_name=config.wandb_run_name,
+        run_id=run_id,
+        training_config=config.to_dict(),
+        model_identifiers={
+            "model_name": config.model_name,
+            "generator_mode": config.generator_mode,
+        },
+        trace_logging_enabled=config.trace_logging_enabled,
+        checkpoint_log_interval_steps=config.checkpoint_log_interval_steps,
     )
+
+    def emit_progress(update: dict[str, Any]) -> None:
+        artifact_paths = logger.record_progress(update)
+        if progress_callback is not None:
+            payload = dict(update)
+            payload.update(artifact_paths)
+            progress_callback(payload)
 
     baseline_summary = {"easy": 0.0, "medium": 0.0, "hard": 0.0, "overall": 0.0}
     trained_summary = {"easy": 0.0, "medium": 0.0, "hard": 0.0, "overall": 0.0}
 
     if config.baseline_eval:
         FastLanguageModel.for_inference(model)
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    "phase": "baseline_eval",
-                    "status": "running",
-                    "completed_steps": 0,
-                    "total_steps": int(config.max_steps),
-                }
-            )
+        emit_progress(
+            {
+                "phase": "baseline_eval",
+                "status": "running",
+                "completed_steps": 0,
+                "total_steps": int(config.max_steps),
+            }
+        )
         baseline_summary = run_policy_evaluation(
             model=model,
             tokenizer=tokenizer,
@@ -688,14 +809,13 @@ def run_training(
             max_new_tokens=config.eval_max_new_tokens,
         )
         print(f"[baseline_eval] {json.dumps(baseline_summary)}")
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    "phase": "baseline_eval",
-                    "status": "completed",
-                    "baseline_summary": baseline_summary,
-                }
-            )
+        emit_progress(
+            {
+                "phase": "baseline_eval",
+                "status": "completed",
+                "baseline_summary": baseline_summary,
+            }
+        )
 
     training_args = GRPOConfig(
         output_dir=str(output_dir),
@@ -707,49 +827,47 @@ def run_training(
         max_completion_length=config.max_completion_length,
         max_steps=config.max_steps,
         logging_steps=1,
-        bf16=config.bf16,
+        bf16=use_bf16,
+        fp16=use_cuda and not use_bf16,
         report_to=[],
     )
 
     class ProgressCallback(TrainerCallback):
         def on_train_begin(self, args, state, control, **kwargs):  # type: ignore[override]
             del args, control, kwargs
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        "phase": "train",
-                        "status": "running",
-                        "completed_steps": int(getattr(state, "global_step", 0)),
-                        "total_steps": int(config.max_steps),
-                        "current_epoch": float(getattr(state, "epoch", 0.0) or 0.0),
-                    }
-                )
+            emit_progress(
+                {
+                    "phase": "train",
+                    "status": "running",
+                    "completed_steps": int(getattr(state, "global_step", 0)),
+                    "total_steps": int(config.max_steps),
+                    "current_epoch": float(getattr(state, "epoch", 0.0) or 0.0),
+                }
+            )
 
         def on_step_end(self, args, state, control, **kwargs):  # type: ignore[override]
             del args, control, kwargs
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        "phase": "train",
-                        "status": "running",
-                        "completed_steps": int(getattr(state, "global_step", 0)),
-                        "total_steps": int(config.max_steps),
-                        "current_epoch": float(getattr(state, "epoch", 0.0) or 0.0),
-                    }
-                )
+            emit_progress(
+                {
+                    "phase": "train",
+                    "status": "running",
+                    "completed_steps": int(getattr(state, "global_step", 0)),
+                    "total_steps": int(config.max_steps),
+                    "current_epoch": float(getattr(state, "epoch", 0.0) or 0.0),
+                }
+            )
 
         def on_train_end(self, args, state, control, **kwargs):  # type: ignore[override]
             del args, control, kwargs
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        "phase": "train",
-                        "status": "completed",
-                        "completed_steps": int(getattr(state, "global_step", 0)),
-                        "total_steps": int(config.max_steps),
-                        "current_epoch": float(getattr(state, "epoch", 0.0) or 0.0),
-                    }
-                )
+            emit_progress(
+                {
+                    "phase": "train",
+                    "status": "completed",
+                    "completed_steps": int(getattr(state, "global_step", 0)),
+                    "total_steps": int(config.max_steps),
+                    "current_epoch": float(getattr(state, "epoch", 0.0) or 0.0),
+                }
+            )
 
     trainer = GRPOTrainer(
         model=model,
@@ -765,15 +883,14 @@ def run_training(
 
     if config.baseline_eval:
         FastLanguageModel.for_inference(model)
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    "phase": "trained_eval",
-                    "status": "running",
-                    "completed_steps": int(config.max_steps),
-                    "total_steps": int(config.max_steps),
-                }
-            )
+        emit_progress(
+            {
+                "phase": "trained_eval",
+                "status": "running",
+                "completed_steps": int(config.max_steps),
+                "total_steps": int(config.max_steps),
+            }
+        )
         trained_summary = run_policy_evaluation(
             model=model,
             tokenizer=tokenizer,
@@ -786,16 +903,23 @@ def run_training(
         )
         print(f"[trained_eval] {json.dumps(trained_summary)}")
         print_evaluation_summary(baseline_summary, trained_summary)
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    "phase": "trained_eval",
-                    "status": "completed",
-                    "trained_summary": trained_summary,
-                }
-            )
+        emit_progress(
+            {
+                "phase": "trained_eval",
+                "status": "completed",
+                "trained_summary": trained_summary,
+            }
+        )
 
     csv_path = logger.write_csv()
+    trace_artifact_paths = logger.finalize_trace_artifacts(
+        reward_curve_csv=csv_path,
+        final_metrics={
+            "baseline_summary": baseline_summary,
+            "trained_summary": trained_summary,
+            "completed_steps": int(config.max_steps),
+        },
+    )
     logger.close()
     print(f"[artifacts] reward curve CSV written to {csv_path}")
 
@@ -803,6 +927,7 @@ def run_training(
         "config": config.to_dict(),
         "output_dir": str(output_dir.resolve()),
         "reward_curve_csv": str(csv_path.resolve()),
+        **trace_artifact_paths,
         "baseline_summary": baseline_summary,
         "trained_summary": trained_summary,
         "completed_steps": int(config.max_steps),
@@ -832,6 +957,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable-wandb", action="store_true")
     parser.add_argument("--wandb-project", default="adapt-dsa-tutor")
     parser.add_argument("--wandb-run-name", default=None)
+    parser.add_argument("--trace-logging-enabled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--checkpoint-log-interval-steps", type=int, default=10)
     parser.add_argument(
         "--generator-mode",
         choices=["heuristic", "reward_aware"],

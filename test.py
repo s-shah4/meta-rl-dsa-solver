@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from scripts.test_env import main as run_env_smoke
 from scripts.test_space_api import main as run_space_api_smoke
+from scripts.test_trace_logging import main as run_trace_logging_smoke
 from scripts.test_verifier import test_cases
 from verifier.verifier import verify
 
@@ -9,6 +10,7 @@ from verifier.verifier import verify
 def main() -> None:
     run_env_smoke()
     run_space_api_smoke()
+    run_trace_logging_smoke()
 
     reward, info = verify(
         "n=int(input())\nnums=list(map(int,input().split()))\nprint(sum(x for x in nums if x % 2 == 0))",

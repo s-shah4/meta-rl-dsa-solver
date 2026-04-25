@@ -32,6 +32,10 @@ def main() -> None:
     assert "completed_steps" in train_status.json()
     assert "remaining_steps" in train_status.json()
     assert "phase" in train_status.json()
+    assert "run_manifest_path" in train_status.json()
+    assert "events_path" in train_status.json()
+    assert "latest_checkpoint_path" in train_status.json()
+    assert "logs_deleted_from_space" in train_status.json()
 
     reset = client.post("/reset", json={"difficulty": "easy", "problem_id": "sum_even_numbers"})
     assert reset.status_code == 200

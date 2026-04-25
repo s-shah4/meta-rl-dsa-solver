@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -69,6 +70,13 @@ class TrainingJobState:
     reward_curve_csv: str | None = None
     model_repo_id: str | None = None
     uploaded_revision: str | None = None
+    logs_dir: str | None = None
+    run_manifest_path: str | None = None
+    events_path: str | None = None
+    latest_checkpoint_path: str | None = None
+    run_summary_path: str | None = None
+    checkpoint_paths: list[str] = field(default_factory=list)
+    logs_deleted_from_space: bool = False
     phase: str = "idle"
     completed_steps: int = 0
     total_steps: int = 0
@@ -430,6 +438,13 @@ class SpaceTrainingManager:
                 reward_curve_csv=payload.get("reward_curve_csv"),
                 model_repo_id=payload.get("model_repo_id"),
                 uploaded_revision=payload.get("uploaded_revision"),
+                logs_dir=payload.get("logs_dir"),
+                run_manifest_path=payload.get("run_manifest_path"),
+                events_path=payload.get("events_path"),
+                latest_checkpoint_path=payload.get("latest_checkpoint_path"),
+                run_summary_path=payload.get("run_summary_path"),
+                checkpoint_paths=payload.get("checkpoint_paths", []),
+                logs_deleted_from_space=bool(payload.get("logs_deleted_from_space", False)),
                 phase=payload.get("phase", "idle"),
                 completed_steps=int(payload.get("completed_steps", 0) or 0),
                 total_steps=int(payload.get("total_steps", 0) or 0),
@@ -508,6 +523,7 @@ class SpaceTrainingManager:
             else:
                 output_dir = self.output_root / requested_output_dir / run_id
             config.output_dir = str(output_dir)
+            logs_dir = output_dir / "logs"
 
             self._job = TrainingJobState(
                 status="running",
@@ -519,6 +535,12 @@ class SpaceTrainingManager:
                 reward_curve_csv=None,
                 model_repo_id=os.getenv("HF_MODEL_REPO_ID"),
                 uploaded_revision=None,
+                logs_dir=str(logs_dir),
+                run_manifest_path=str(logs_dir / "run_manifest.json"),
+                events_path=str(logs_dir / "events.jsonl"),
+                latest_checkpoint_path=str(logs_dir / "latest_checkpoint.json"),
+                run_summary_path=str(logs_dir / "run_summary.json"),
+                checkpoint_paths=[],
                 phase="queued",
                 completed_steps=0,
                 total_steps=int(config.max_steps),
@@ -562,11 +584,22 @@ class SpaceTrainingManager:
         )
         return getattr(commit_info, "oid", None) or getattr(commit_info, "commit_hash", None) or "unknown"
 
+    def _cleanup_local_logs(self, log_dir: str | None) -> bool:
+        if not log_dir:
+            return False
+        folder_path = Path(log_dir)
+        if not folder_path.exists():
+            return False
+        shutil.rmtree(folder_path, ignore_errors=True)
+        return not folder_path.exists()
+
     def _run_training_job(self, run_id: str, config: TrainingConfig) -> None:
+        summary: dict[str, Any] | None = None
         try:
-            summary = run_training(config, progress_callback=self._update_progress)
+            summary = run_training(config, run_id=run_id, progress_callback=self._update_progress)
             artifact_path = summary["output_dir"]
             uploaded_revision = self._upload_artifacts(artifact_path, run_id)
+            logs_deleted = self._cleanup_local_logs(summary.get("logs_dir"))
             self.model_registry.load_latest_from_hub()
 
             with self._lock:
@@ -576,6 +609,13 @@ class SpaceTrainingManager:
                 self._job.reward_curve_csv = summary.get("reward_curve_csv")
                 self._job.model_repo_id = os.getenv("HF_MODEL_REPO_ID")
                 self._job.uploaded_revision = uploaded_revision
+                self._job.logs_dir = None if logs_deleted else summary.get("logs_dir")
+                self._job.run_manifest_path = None if logs_deleted else summary.get("run_manifest_path")
+                self._job.events_path = None if logs_deleted else summary.get("events_path")
+                self._job.latest_checkpoint_path = None if logs_deleted else summary.get("latest_checkpoint_path")
+                self._job.run_summary_path = None if logs_deleted else summary.get("run_summary_path")
+                self._job.checkpoint_paths = [] if logs_deleted else summary.get("checkpoint_paths", [])
+                self._job.logs_deleted_from_space = logs_deleted
                 self._job.phase = "completed"
                 self._job.completed_steps = int(summary.get("completed_steps", config.max_steps))
                 self._job.total_steps = int(config.max_steps)
@@ -589,9 +629,18 @@ class SpaceTrainingManager:
                 self._job.traceback = None
                 self._persist_status()
         except Exception as exc:
+            logs_deleted = self._cleanup_local_logs(summary.get("logs_dir") if summary else self._job.logs_dir)
             with self._lock:
                 self._job.status = "failed"
                 self._job.finished_at = _utc_now()
+                if logs_deleted:
+                    self._job.logs_dir = None
+                    self._job.run_manifest_path = None
+                    self._job.events_path = None
+                    self._job.latest_checkpoint_path = None
+                    self._job.run_summary_path = None
+                    self._job.checkpoint_paths = []
+                self._job.logs_deleted_from_space = logs_deleted
                 self._job.error = str(exc)
                 self._job.traceback = traceback.format_exc()
                 self._persist_status()
