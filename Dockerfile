@@ -4,11 +4,7 @@ WORKDIR /app
 
 COPY . .
 
-RUN pip install --no-cache-dir -e . \
-    && pip install --no-cache-dir "accelerate>=1.2.0" "trl>=0.15.0" unsloth
-
-ENV PYTHONPATH="/app/env:${PYTHONPATH}"
-ENV SPACE_OUTPUT_ROOT="/tmp/adapt-space"
+RUN pip install --no-cache-dir -e .
 
 EXPOSE 7860
 
