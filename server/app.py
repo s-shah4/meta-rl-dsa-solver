@@ -46,7 +46,7 @@ class ResetRequest(BaseModel):
 
 
 class TrainRequest(BaseModel):
-    preset: str = "l4"
+    preset: str = "smoke"
     model_name: Optional[str] = None
     output_dir: Optional[str] = None
     dataset_size: Optional[int] = None
@@ -54,15 +54,28 @@ class TrainRequest(BaseModel):
     batch_size: Optional[int] = None
     gradient_accumulation_steps: Optional[int] = None
     num_generations: Optional[int] = None
+    max_seq_length: Optional[int] = None
+    max_prompt_length: Optional[int] = None
+    max_completion_length: Optional[int] = None
+    learning_rate: Optional[float] = None
+    lora_rank: Optional[int] = None
+    lora_alpha: Optional[int] = None
     load_in_4bit: Optional[bool] = None
     gradient_checkpointing: Optional[bool] = None
+    bf16: Optional[bool] = None
     evaluation_episodes: Optional[int] = None
+    eval_max_new_tokens: Optional[int] = None
     baseline_eval: Optional[bool] = None
+    wandb_project: Optional[str] = None
+    wandb_run_name: Optional[str] = None
     generator_mode: Optional[str] = None
+    non_deterministic_generator: Optional[bool] = None
     use_dataset: bool = False
     dataset_name: str = "deepmind/code_contests"
     dataset_max_problems: int = 5000
     disable_wandb: Optional[bool] = None
+    trace_logging_enabled: Optional[bool] = None
+    checkpoint_log_interval_steps: Optional[int] = None
     save_merged_model: Optional[bool] = None
 
 
