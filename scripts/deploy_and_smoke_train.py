@@ -66,6 +66,45 @@ def push_to_space(repo_root: Path, remote: str, remote_branch: str) -> None:
     print(push_result.stdout.strip() or push_result.stderr.strip(), flush=True)
 
 
+def current_head_sha(repo_root: Path) -> str:
+    result = run_command(["git", "rev-parse", "HEAD"], repo_root)
+    ensure_success(result, "git rev-parse HEAD")
+    return result.stdout.strip()
+
+
+def remote_branch_sha(repo_root: Path, remote: str, remote_branch: str) -> str | None:
+    result = run_command(["git", "ls-remote", remote, f"refs/heads/{remote_branch}"], repo_root)
+    ensure_success(result, f"git ls-remote {remote} refs/heads/{remote_branch}")
+    line = result.stdout.strip()
+    if not line:
+        return None
+    return line.split()[0]
+
+
+def deployment_needed(repo_root: Path, remote: str, remote_branch: str) -> bool:
+    local_sha = current_head_sha(repo_root)
+    remote_sha = remote_branch_sha(repo_root, remote, remote_branch)
+    if remote_sha is None:
+        print(
+            f"Remote branch {remote}/{remote_branch} does not exist yet. A deployment push is required.",
+            flush=True,
+        )
+        return True
+
+    if local_sha == remote_sha:
+        print(
+            f"Skipping Space deploy because {remote}/{remote_branch} is already at local HEAD {local_sha}.",
+            flush=True,
+        )
+        return False
+
+    print(
+        f"Space deploy required: local HEAD {local_sha} differs from {remote}/{remote_branch} {remote_sha}.",
+        flush=True,
+    )
+    return True
+
+
 def http_json(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     data = None
     headers = {}
@@ -249,14 +288,18 @@ def main(argv: list[str] | None = None) -> int:
         if commit_hash:
             print(f"Committed changes at {commit_hash}", flush=True)
 
-        push_to_space(repo_root, args.remote, args.remote_branch)
-        wait_for_space_health(
-            base_url=args.base_url,
-            timeout_seconds=args.timeout_seconds,
-            poll_interval_seconds=args.poll_interval_seconds,
-            required_healthy_checks=args.required_healthy_checks,
-            min_deploy_wait_seconds=args.min_deploy_wait_seconds,
-        )
+        should_deploy = deployment_needed(repo_root, args.remote, args.remote_branch)
+        if should_deploy:
+            push_to_space(repo_root, args.remote, args.remote_branch)
+            wait_for_space_health(
+                base_url=args.base_url,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval_seconds=args.poll_interval_seconds,
+                required_healthy_checks=args.required_healthy_checks,
+                min_deploy_wait_seconds=args.min_deploy_wait_seconds,
+            )
+        else:
+            print("Reusing the currently deployed Space revision. Skipping deploy wait.", flush=True)
         start_smoke_training(args.base_url)
         final_status = poll_training_status(
             base_url=args.base_url,
