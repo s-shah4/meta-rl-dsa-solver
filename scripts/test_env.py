@@ -1,12 +1,25 @@
-from meta_rl_dsa_solver_env.env import DsaEnv
+from env.adapt_env import AdaptEnvironment
+from models import AdaptAction
 
-env = DsaEnv()
-obs, info = env.reset()
-print(f"Observation: {obs}")
+env = AdaptEnvironment()
 
-# Simulate a correct LLM response
-sample_code = "def sum_list(arr):\n    return sum(arr)"
-obs, reward, terminated, truncated, info = env.step(sample_code)
+# Test Case 1: Easy Double
+print("--- Testing Easy Double ---")
+obs = env.reset(problem_id="easy_double")
+print(f"Problem: {obs.problem}")
 
-print(f"Reward: {reward}") # Should be 1.0
-print(f"Success: {info['success']}")
+# Simulate LLM providing code that reads from stdin (as required by your env)
+sample_code = """
+import sys
+for line in sys.stdin:
+    n = int(line.strip())
+    print(n * 2)
+"""
+
+action = AdaptAction(code=sample_code)
+obs = env.step(action)
+
+print(f"Reward: {obs.reward}")
+print(f"Pass Rate: {obs.pass_rate}")
+print(f"Feedback: {obs.feedback}")
+print(f"Components: {obs.reward_components}")

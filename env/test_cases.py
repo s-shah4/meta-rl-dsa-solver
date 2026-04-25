@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from typing import Any
 
 
@@ -114,16 +115,27 @@ def load_problem_bank() -> list[dict[str, Any]]:
 def load_problem(problem_id: str | None = None, difficulty: str | None = None) -> dict[str, Any]:
     problems = load_problem_bank()
     if problem_id is not None:
-        for problem in problems:
-            if problem["problem_id"] == problem_id:
-                return problem
+        matches = [problem for problem in problems if problem["problem_id"] == problem_id]
+        if matches:
+            return random.choice(matches)
 
     if difficulty is not None:
-        for problem in problems:
-            if problem["difficulty"] == difficulty:
-                return problem
+        matches = [problem for problem in problems if problem["difficulty"] == difficulty]
+        if matches:
+            return random.choice(matches)
 
-    return problems[0]
+    return random.choice(problems)
+
+
+def get_test_cases(problem: dict[str, Any], difficulty: int) -> list[dict[str, str]]:
+    base_cases = [dict(test_case) for test_case in problem.get("test_cases", [])]
+    if not base_cases:
+        return []
+
+    tier = max(1, min(3, int(difficulty)))
+    selected = _select_cases_for_tier(base_cases, tier)
+    random.shuffle(selected)
+    return selected
 
 
 def split_test_cases(
@@ -137,3 +149,48 @@ def _copy_problem(problem: dict[str, Any]) -> dict[str, Any]:
     copied["examples"] = [dict(example) for example in problem["examples"]]
     copied["test_cases"] = [dict(test_case) for test_case in problem["test_cases"]]
     return copied
+
+
+def _select_cases_for_tier(
+    test_cases: list[dict[str, str]],
+    tier: int,
+) -> list[dict[str, str]]:
+    total = len(test_cases)
+    if total <= VISIBLE_TEST_COUNT:
+        return [dict(test_case) for test_case in test_cases]
+
+    simple_end = max(1, total // 3)
+    moderate_end = max(simple_end + 1, (2 * total) // 3)
+
+    simple_cases = test_cases[:simple_end]
+    moderate_cases = test_cases[simple_end:moderate_end]
+    stress_cases = test_cases[moderate_end:]
+
+    if tier == 1:
+        candidate_pool = simple_cases + _sample_subset(moderate_cases, 1)
+        target_size = min(
+            len(candidate_pool),
+            max(VISIBLE_TEST_COUNT + 1, len(simple_cases)),
+        )
+        return _sample_subset(candidate_pool, target_size)
+
+    if tier == 2:
+        candidate_pool = simple_cases + moderate_cases + _sample_subset(stress_cases, 1)
+        target_size = min(
+            len(candidate_pool),
+            max(VISIBLE_TEST_COUNT + 2, len(simple_cases) + len(moderate_cases)),
+        )
+        return _sample_subset(candidate_pool, target_size)
+
+    return [dict(test_case) for test_case in test_cases]
+
+
+def _sample_subset(
+    test_cases: list[dict[str, str]],
+    count: int,
+) -> list[dict[str, str]]:
+    if not test_cases or count <= 0:
+        return []
+    if count >= len(test_cases):
+        return [dict(test_case) for test_case in test_cases]
+    return [dict(test_case) for test_case in random.sample(test_cases, count)]

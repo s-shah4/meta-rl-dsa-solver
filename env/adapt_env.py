@@ -7,11 +7,12 @@ from uuid import uuid4
 from openenv.core.env_server.interfaces import Environment
 
 from env.executor import run_code
-from env.test_cases import load_problem, split_test_cases
+from env.test_cases import get_test_cases, load_problem, split_test_cases
 from models import AdaptAction, AdaptObservation, AdaptState
 
 
 FORBIDDEN_IMPORTS = {"os", "pathlib", "shutil", "socket", "subprocess"}
+DIFFICULTY_LABELS = {1: "easy", 2: "medium", 3: "hard"}
 
 
 class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
@@ -25,6 +26,11 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         self.visible_tests: list[dict[str, str]] = []
         self.hidden_tests: list[dict[str, str]] = []
         self.last_results: list[dict[str, Any]] = []
+        self.history: list[float] = []
+        self.max_history = 20
+        self.difficulty: int = 1
+        self.min_difficulty = 1
+        self.max_difficulty = 3
 
     def reset(
         self,
@@ -35,15 +41,25 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         **_: Any,
     ) -> AdaptObservation:
         del seed
-        self.problem = load_problem(problem_id=problem_id, difficulty=difficulty)
-        self.test_cases = [dict(test_case) for test_case in self.problem["test_cases"]]
+        if difficulty is not None:
+            self.difficulty = self._difficulty_to_tier(difficulty)
+        elif len(self.history) >= 5:
+            success_rate = self._get_success_rate()
+            if success_rate > 0.7:
+                self.difficulty = min(self.difficulty + 1, self.max_difficulty)
+            elif success_rate < 0.3:
+                self.difficulty = max(self.difficulty - 1, self.min_difficulty)
+
+        difficulty_label = self._tier_to_difficulty(self.difficulty)
+        self.problem = load_problem(problem_id=problem_id, difficulty=difficulty_label)
+        self.test_cases = get_test_cases(self.problem, self.difficulty)
         self.visible_tests, self.hidden_tests = split_test_cases(self.test_cases)
         self.last_results = []
         self._state = AdaptState(
             episode_id=episode_id or str(uuid4()),
             step_count=0,
             problem_id=self.problem["problem_id"],
-            difficulty=self.problem["difficulty"],
+            difficulty=difficulty_label,
         )
         return self._build_observation(
             reward=0.0,
@@ -71,6 +87,7 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
                 syntax_valid=False,
                 execution_status="syntax_error",
             )
+            self._update_history(observation.reward)
             self._record_metrics(observation)
             return observation
 
@@ -83,6 +100,7 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
                 syntax_valid=True,
                 execution_status="safety_violation",
             )
+            self._update_history(observation.reward)
             self._record_metrics(observation)
             return observation
 
@@ -109,6 +127,7 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
             format_compliance=metrics["format_compliance"],
             reward_components=metrics["reward_components"],
         )
+        self._update_history(observation.reward)
         self._record_metrics(observation)
         return observation
 
@@ -133,7 +152,7 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
     ) -> AdaptObservation:
         return AdaptObservation(
             problem_id=self.problem["problem_id"],
-            difficulty=self.problem["difficulty"],
+            difficulty=self._tier_to_difficulty(self.difficulty),
             problem=self.problem["problem"],
             input_format=self.problem["input_format"],
             constraints=self.problem["constraints"],
@@ -250,11 +269,25 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
 
         return f"All tests passed. Pass rate: {pass_rate:.2f}"
 
+    def _get_success_rate(self) -> float:
+        if not self.history:
+            return 0.0
+        return sum(self.history) / len(self.history)
+
+    def _update_history(self, reward: float) -> None:
+        self.history.append(float(reward))
+        if len(self.history) > self.max_history:
+            self.history.pop(0)
+
     def _record_metrics(self, observation: AdaptObservation) -> None:
         self._state.last_reward = float(observation.reward or 0.0)
         self._state.last_pass_rate = observation.pass_rate
         self._state.last_feedback = observation.feedback
         self._state.recent_metrics = {
+            "difficulty_tier": self.difficulty,
+            "difficulty_label": self._tier_to_difficulty(self.difficulty),
+            "moving_success_rate": round(self._get_success_rate(), 4),
+            "history_size": len(self.history),
             "visible_pass_rate": observation.visible_pass_rate,
             "hidden_pass_rate": observation.hidden_pass_rate,
             "execution_status": observation.execution_status,
@@ -309,3 +342,21 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         if result["split"] == "visible":
             return f"visible input {str(result['input']).strip()}"
         return f"hidden test {result['index'] + 1}"
+
+    def _tier_to_difficulty(self, tier: int) -> str:
+        return DIFFICULTY_LABELS.get(tier, "easy")
+
+    def _difficulty_to_tier(self, difficulty: str) -> int:
+        normalized = str(difficulty).strip().lower()
+        if normalized.isdigit():
+            try:
+                return max(
+                    self.min_difficulty,
+                    min(self.max_difficulty, int(normalized)),
+                )
+            except ValueError:
+                return self.difficulty
+        for tier, label in DIFFICULTY_LABELS.items():
+            if normalized == label:
+                return tier
+        return self.difficulty
