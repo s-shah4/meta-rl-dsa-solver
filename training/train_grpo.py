@@ -735,7 +735,7 @@ def run_training(
     PatchFastRL("GRPO", FastLanguageModel)
 
     use_cuda = torch.cuda.is_available()
-    use_bf16 = bool(config.bf16) or (use_cuda and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported())
+    use_bf16 = bool(config.bf16)
     model_dtype = torch.bfloat16 if use_bf16 else (torch.float16 if use_cuda else torch.float32)
 
     model, tokenizer = FastLanguageModel.from_pretrained(
