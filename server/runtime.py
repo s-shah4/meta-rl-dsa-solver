@@ -316,7 +316,22 @@ class SpaceModelRegistry:
             local_dir=str(self.cache_dir / repo_id.replace("/", "__")),
             local_dir_use_symlinks=False,
         )
-        return self.load_from_local(local_path, source_repo_id=repo_id, revision=getattr(info, "sha", None))
+        try:
+            return self.load_from_local(local_path, source_repo_id=repo_id, revision=getattr(info, "sha", None))
+        except Exception as exc:
+            with self._lock:
+                self._model = None
+                self._tokenizer = None
+                self._set_state(
+                    loaded=self._base_model is not None and self._base_tokenizer is not None,
+                    active_model_kind="base",
+                    source_repo_id=repo_id,
+                    base_model_name=base_model_name,
+                    local_path=base_model_name,
+                    revision=getattr(info, "sha", None),
+                    error=f"Trained model repo is not loadable yet: {exc}",
+                )
+                return self.status_payload()
 
     def run_policy(
         self,
