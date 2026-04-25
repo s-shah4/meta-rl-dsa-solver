@@ -181,47 +181,59 @@ class GeneratorAgent:
                     return normalized_problem
 
         rng = self._rng_for(target_tier, history, problem_id, family_weights or {})
-        template = self._choose_template(
+        templates_to_try = self._candidate_templates_for_generation(
             target_tier,
             history,
             rng,
             forced_problem_type=problem_id,
             family_weights=family_weights or {},
         )
+        failures: list[str] = []
 
-        for _ in range(20):
-            raw_cases = template.case_builder(rng)
-            test_cases = [
-                {
-                    "input": case_input,
-                    "output": template.solver(case_input),
-                    "is_visible": index < VISIBLE_TEST_COUNT,
-                }
-                for index, case_input in enumerate(raw_cases)
-            ]
-            signature = self._problem_signature(template.problem_type, test_cases)
-            problem = {
-                "problem_id": f"{template.problem_type}_{signature[:8]}",
-                "problem_type": template.problem_type,
-                "difficulty": round(self._tier_to_scalar(target_tier), 4),
-                "difficulty_label": DIFFICULTY_LABELS[target_tier],
-                "problem": template.statement_builder(),
-                "input_format": template.input_format,
-                "constraints": template.constraints,
-                "test_cases": test_cases,
-                "visible_problem": {
-                    "problem": template.statement_builder(),
-                    "input_format": template.input_format,
-                    "constraints": template.constraints,
-                },
-                "generation_mode": "deterministic_fallback" if self.deterministic else "local_rule_based",
-                "validity_bonus": 0.15,
-            }
-            normalized_problem = normalize_problem(problem)
-            if validate_problem(normalized_problem):
-                return normalized_problem
+        for template in templates_to_try:
+            for _ in range(20):
+                try:
+                    raw_cases = template.case_builder(rng)
+                    test_cases = [
+                        {
+                            "input": case_input,
+                            "output": template.solver(case_input),
+                            "is_visible": index < VISIBLE_TEST_COUNT,
+                        }
+                        for index, case_input in enumerate(raw_cases)
+                    ]
+                    signature = self._problem_signature(template.problem_type, test_cases)
+                    statement = template.statement_builder()
+                    problem = {
+                        "problem_id": f"{template.problem_type}_{signature[:8]}",
+                        "problem_type": template.problem_type,
+                        "difficulty": round(self._tier_to_scalar(target_tier), 4),
+                        "difficulty_label": DIFFICULTY_LABELS[target_tier],
+                        "problem": statement,
+                        "input_format": template.input_format,
+                        "constraints": template.constraints,
+                        "test_cases": test_cases,
+                        "visible_problem": {
+                            "problem": statement,
+                            "input_format": template.input_format,
+                            "constraints": template.constraints,
+                        },
+                        "generation_mode": "deterministic_fallback" if self.deterministic else "local_rule_based",
+                        "validity_bonus": 0.15,
+                    }
+                    normalized_problem = normalize_problem(problem)
+                    if validate_problem(normalized_problem):
+                        return normalized_problem
+                except Exception as exc:
+                    failures.append(f"{template.problem_type}: {exc}")
+                    break
 
-        raise ValueError(f"Unable to generate a valid problem for template {template.problem_type}")
+            failures.append(f"{template.problem_type}: invalid after retries")
+
+        raise ValueError(
+            "Unable to generate a valid problem across candidate templates. "
+            f"Last failures: {failures[-5:]}"
+        )
 
     def generate(
         self,
@@ -267,6 +279,46 @@ class GeneratorAgent:
             weights.append(base_weight)
 
         return rng.choices(eligible, weights=weights, k=1)[0]
+
+    def _candidate_templates_for_generation(
+        self,
+        tier: int,
+        history: dict[str, Any],
+        rng: random.Random,
+        forced_problem_type: str | None = None,
+        family_weights: dict[str, float] | None = None,
+    ) -> list[ProblemTemplate]:
+        if forced_problem_type:
+            forced_matches = [template for template in self.templates if template.problem_type == forced_problem_type]
+            if forced_matches:
+                return forced_matches
+
+        eligible = [template for template in self.templates if template.difficulty_tier == tier]
+        if not eligible:
+            eligible = list(self.templates)
+
+        primary = self._choose_template(
+            tier,
+            history,
+            rng,
+            forced_problem_type=forced_problem_type,
+            family_weights=family_weights or {},
+        )
+        remaining_eligible = [template for template in eligible if template != primary]
+        rng.shuffle(remaining_eligible)
+
+        fallback_templates = [template for template in self.templates if template not in eligible and template != primary]
+        rng.shuffle(fallback_templates)
+
+        ordered = [primary, *remaining_eligible, *fallback_templates]
+        deduped: list[ProblemTemplate] = []
+        seen_problem_types: set[str] = set()
+        for template in ordered:
+            if template.problem_type in seen_problem_types:
+                continue
+            seen_problem_types.add(template.problem_type)
+            deduped.append(template)
+        return deduped
 
     def _rng_for(
         self,

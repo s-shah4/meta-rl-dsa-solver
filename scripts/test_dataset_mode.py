@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -9,7 +10,7 @@ if str(ROOT) not in sys.path:
 
 from env import dataset_loader
 from env.adapt_env import AdaptEnvironment
-from env.generator import GeneratorAgent, validate_problem
+from env.generator import GeneratorAgent, ProblemTemplate, validate_problem
 from env.test_cases import load_problem_bank
 from models import AdaptAction
 
@@ -107,6 +108,26 @@ def main() -> None:
         assert injected_result.execution_status == "completed"
         assert injected_result.reward > 0.0
         assert 0.0 <= injected_result.reward_components.get("efficiency_score", -1.0) <= 1.0
+
+        resilient_agent = GeneratorAgent()
+        good_template = next(template for template in resilient_agent.templates if template.problem_type == "sum_even_numbers")
+        bad_template = ProblemTemplate(
+            problem_type="always_bad",
+            difficulty_tier=good_template.difficulty_tier,
+            title="Always Bad",
+            input_format=good_template.input_format,
+            constraints=good_template.constraints,
+            statement_builder=lambda: "Bad template used for fallback testing.",
+            solver=good_template.solver,
+            case_builder=lambda rng: ["1\n1\n"] * 10,
+        )
+        resilient_agent.templates = [bad_template, *resilient_agent.templates]
+
+        with patch.object(resilient_agent, "_choose_template", return_value=bad_template):
+            resilient_problem = resilient_agent.generate_problem("easy", {})
+        assert resilient_problem["problem_type"] != "always_bad"
+        assert validate_problem(resilient_problem)
+
         print("Dataset mode smoke tests passed")
     finally:
         dataset_loader._BANK = original_bank
