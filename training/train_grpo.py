@@ -707,6 +707,47 @@ def print_evaluation_summary(baseline: dict[str, Any], trained: dict[str, Any]) 
         print(f"{tier:<12} {baseline.get(tier, 0.0):>10.3f} {trained.get(tier, 0.0):>10.3f}")
 
 
+def normalize_model_precision(model: Any, target_dtype: Any) -> dict[str, Any]:
+    floating_param_dtypes: dict[str, int] = {}
+    floating_buffer_dtypes: dict[str, int] = {}
+    sample_param_names: list[str] = []
+    sample_buffer_names: list[str] = []
+    converted_params = 0
+    converted_buffers = 0
+
+    for name, param in model.named_parameters():
+        if not getattr(param, "is_floating_point", lambda: False)():
+            continue
+        dtype_name = str(param.dtype)
+        floating_param_dtypes[dtype_name] = floating_param_dtypes.get(dtype_name, 0) + 1
+        if param.dtype != target_dtype:
+            if len(sample_param_names) < 8:
+                sample_param_names.append(f"{name}:{param.dtype}")
+            param.data = param.data.to(dtype=target_dtype)
+            converted_params += 1
+
+    for name, buffer in model.named_buffers():
+        if not getattr(buffer, "is_floating_point", lambda: False)():
+            continue
+        dtype_name = str(buffer.dtype)
+        floating_buffer_dtypes[dtype_name] = floating_buffer_dtypes.get(dtype_name, 0) + 1
+        if buffer.dtype != target_dtype:
+            if len(sample_buffer_names) < 8:
+                sample_buffer_names.append(f"{name}:{buffer.dtype}")
+            buffer.data = buffer.data.to(dtype=target_dtype)
+            converted_buffers += 1
+
+    return {
+        "target_dtype": str(target_dtype),
+        "floating_param_dtypes": floating_param_dtypes,
+        "floating_buffer_dtypes": floating_buffer_dtypes,
+        "converted_params": converted_params,
+        "converted_buffers": converted_buffers,
+        "sample_param_names": sample_param_names,
+        "sample_buffer_names": sample_buffer_names,
+    }
+
+
 def run_training(
     config: TrainingConfig | argparse.Namespace,
     *,
@@ -769,6 +810,8 @@ def run_training(
         model = model.to(model_dtype)
         if hasattr(model, "config"):
             model.config.torch_dtype = model_dtype
+        precision_audit = normalize_model_precision(model, model_dtype)
+        print(f"[training] precision audit {json.dumps(precision_audit, sort_keys=True)}")
 
     curriculum = CurriculumManager()
     controller = GeneratorController(

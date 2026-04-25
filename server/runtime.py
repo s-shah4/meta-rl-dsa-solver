@@ -262,27 +262,31 @@ class SpaceModelRegistry:
     def load_latest_from_hub(self) -> dict[str, Any]:
         repo_id = os.getenv("HF_MODEL_REPO_ID")
         token = os.getenv("HF_TOKEN")
-        base_model_name = os.getenv("BASE_MODEL_NAME")
+        base_model_name = self._base_model_name()
 
         if not repo_id:
             with self._lock:
                 self._set_state(
-                    loaded=False,
-                    active_model_kind="unavailable",
+                    loaded=self._base_model is not None and self._base_tokenizer is not None,
+                    active_model_kind="base",
                     source_repo_id=None,
                     base_model_name=base_model_name,
-                    error="HF_MODEL_REPO_ID is not configured.",
+                    local_path=base_model_name,
+                    revision=None,
+                    error=None,
                 )
                 return self.status_payload()
 
         if not token:
             with self._lock:
                 self._set_state(
-                    loaded=False,
-                    active_model_kind="unavailable",
+                    loaded=self._base_model is not None and self._base_tokenizer is not None,
+                    active_model_kind="base",
                     source_repo_id=repo_id,
                     base_model_name=base_model_name,
-                    error="HF_TOKEN is not configured.",
+                    local_path=base_model_name,
+                    revision=None,
+                    error=None,
                 )
                 return self.status_payload()
 
