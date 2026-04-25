@@ -1,0 +1,4 @@
+openenv 
+fastapi 
+uvicorn 
+pydantic
