@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 from uuid import uuid4
 
 import uvicorn
@@ -13,16 +13,18 @@ from pydantic import BaseModel
 from env.adapt_env import AdaptEnvironment
 from env.test_cases import load_problem_bank
 from models import AdaptAction, AdaptObservation, AdaptState
+from server.runtime import SpaceTrainingManager
 
 ENV_NAME = "adapt-dsa-tutor"
 ENV_DESCRIPTION = (
     "Adversarial DSA Programming Tutor - RL environment for training LLMs to solve "
     "algorithmic problems through adaptive curriculum and self-repair."
 )
-ENV_VERSION = "0.3.0"
+ENV_VERSION = "0.4.0"
 SESSION_TTL = timedelta(minutes=30)
 SESSIONS: dict[str, AdaptEnvironment] = {}
 SESSION_LAST_ACCESSED: dict[str, datetime] = {}
+TRAINING_MANAGER = SpaceTrainingManager()
 TASKS = [
     {
         "name": problem["problem_id"],
@@ -36,11 +38,45 @@ app = FastAPI(title="ADAPT DSA Tutor OpenEnv", version=ENV_VERSION)
 
 
 class ResetRequest(BaseModel):
-    session_id: str | None = None
-    seed: int | None = None
-    episode_id: str | None = None
-    problem_id: str | None = None
-    difficulty: str | None = None
+    session_id: Optional[str] = None
+    seed: Optional[int] = None
+    episode_id: Optional[str] = None
+    problem_id: Optional[str] = None
+    difficulty: Optional[str] = None
+
+
+class TrainRequest(BaseModel):
+    preset: str = "smoke"
+    model_name: Optional[str] = None
+    output_dir: Optional[str] = None
+    dataset_size: Optional[int] = None
+    max_steps: Optional[int] = None
+    batch_size: Optional[int] = None
+    gradient_accumulation_steps: Optional[int] = None
+    num_generations: Optional[int] = None
+    evaluation_episodes: Optional[int] = None
+    baseline_eval: Optional[bool] = None
+    generator_mode: Optional[str] = None
+    disable_wandb: Optional[bool] = None
+
+
+class RunTrainedPolicyRequest(BaseModel):
+    problem_id: Optional[str] = None
+    difficulty: Optional[str] = None
+    max_new_tokens: int = 512
+
+
+class GenerateCodeRequest(BaseModel):
+    problem: str
+    input_format: str
+    constraints: str
+    feedback: Optional[str] = None
+    problem_id: str = "custom_problem"
+    problem_type: str = "custom"
+    difficulty: str = "custom"
+    attempt_number: int = 1
+    max_steps: int = 1
+    max_new_tokens: int = 512
 
 
 def _metadata() -> dict[str, Any]:
@@ -82,12 +118,19 @@ def _require_session(session_id: str) -> AdaptEnvironment:
     return env
 
 
+@app.on_event("startup")
+def startup() -> None:
+    TRAINING_MANAGER.load_latest_model()
+
+
 @app.get("/")
 def root() -> dict[str, Any]:
     _cleanup_sessions()
     payload = _metadata()
     payload["status"] = "ok"
     payload["active_sessions"] = len(SESSIONS)
+    payload["training"] = TRAINING_MANAGER.status_payload()
+    payload["model"] = TRAINING_MANAGER.model_status_payload()
     return payload
 
 
@@ -109,7 +152,12 @@ def favicon() -> Response:
 @app.get("/health")
 def health() -> dict[str, Any]:
     _cleanup_sessions()
-    return {"status": "healthy", "active_sessions": len(SESSIONS)}
+    return {
+        "status": "healthy",
+        "active_sessions": len(SESSIONS),
+        "training": TRAINING_MANAGER.status_payload()["status"],
+        "model_loaded": TRAINING_MANAGER.model_status_payload()["loaded"],
+    }
 
 
 @app.get("/metadata")
@@ -134,6 +182,58 @@ def schema() -> dict[str, Any]:
     }
 
 
+@app.get("/train/status")
+def train_status() -> dict[str, Any]:
+    return TRAINING_MANAGER.status_payload()
+
+
+@app.get("/model/status")
+def model_status() -> dict[str, Any]:
+    return TRAINING_MANAGER.model_status_payload()
+
+
+@app.post("/train")
+def train(request: Optional[TrainRequest] = None) -> dict[str, Any]:
+    try:
+        return TRAINING_MANAGER.start_training((request or TrainRequest()).model_dump())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/run-trained-policy")
+def run_trained_policy(request: Optional[RunTrainedPolicyRequest] = None) -> dict[str, Any]:
+    effective_request = request or RunTrainedPolicyRequest()
+    try:
+        return TRAINING_MANAGER.run_trained_policy(
+            problem_id=effective_request.problem_id,
+            difficulty=effective_request.difficulty,
+            max_new_tokens=effective_request.max_new_tokens,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/generate-code")
+def generate_code(request: GenerateCodeRequest) -> dict[str, Any]:
+    try:
+        return TRAINING_MANAGER.generate_code(
+            problem=request.problem,
+            input_format=request.input_format,
+            constraints=request.constraints,
+            feedback=request.feedback,
+            problem_id=request.problem_id,
+            problem_type=request.problem_type,
+            difficulty=request.difficulty,
+            attempt_number=request.attempt_number,
+            max_steps=request.max_steps,
+            max_new_tokens=request.max_new_tokens,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/mcp")
 def mcp(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
     _cleanup_sessions()
@@ -148,7 +248,7 @@ def mcp(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
 
 
 @app.post("/reset")
-def reset(request: ResetRequest | None = None) -> dict[str, Any]:
+def reset(request: Optional[ResetRequest] = None) -> dict[str, Any]:
     _cleanup_sessions()
     effective_request = request or ResetRequest()
     session_id = effective_request.session_id or str(uuid4())
@@ -205,7 +305,7 @@ def state(session_id: str = Query(..., description="Session id returned from /re
     return env.state.model_dump()
 
 
-def main(host: str | None = None, port: int | None = None) -> None:
+def main(host: Optional[str] = None, port: Optional[int] = None) -> None:
     if host is None or port is None:
         parser = argparse.ArgumentParser()
         parser.add_argument("--host", default="0.0.0.0")

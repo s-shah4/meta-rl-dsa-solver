@@ -4,11 +4,9 @@ import argparse
 import csv
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-
-import torch
 
 from env.adapt_env import AdaptEnvironment, MAX_STEPS_PER_EPISODE
 from env.generator import DIFFICULTY_LABELS, GeneratorAgent
@@ -19,6 +17,52 @@ Write only runnable Python code.
 The program must read from stdin and print to stdout.
 If feedback is present, repair your previous solution instead of starting from scratch.
 Do not include markdown fences or explanations."""
+
+
+@dataclass
+class TrainingConfig:
+    model_name: str = "unsloth/Llama-3.2-3B-Instruct"
+    output_dir: str = "outputs_v3"
+    dataset_size: int = 200
+    max_steps: int = 250
+    batch_size: int = 1
+    gradient_accumulation_steps: int = 8
+    num_generations: int = 8
+    max_seq_length: int = 2048
+    max_prompt_length: int = 1024
+    max_completion_length: int = 512
+    learning_rate: float = 5e-6
+    lora_rank: int = 16
+    lora_alpha: int = 16
+    disable_4bit: bool = False
+    bf16: bool = False
+    baseline_eval: bool = False
+    evaluation_episodes: int = 20
+    eval_max_new_tokens: int = 512
+    disable_wandb: bool = False
+    wandb_project: str = "adapt-dsa-tutor"
+    wandb_run_name: str | None = None
+    generator_mode: str = "reward_aware"
+    non_deterministic_generator: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+TRAINING_PRESETS: dict[str, dict[str, Any]] = {
+    "smoke": {
+        "dataset_size": 12,
+        "max_steps": 6,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 2,
+        "num_generations": 2,
+        "evaluation_episodes": 3,
+        "baseline_eval": False,
+        "disable_wandb": True,
+        "output_dir": "outputs_smoke",
+    },
+    "default": {},
+}
 
 
 def extract_code(completion: str) -> str:
@@ -69,6 +113,50 @@ def build_prompt_from_problem(problem: dict[str, Any]) -> str:
         "feedback": "No previous attempt yet. Solve the problem directly from the examples and constraints.",
     }
     return build_solver_prompt(payload)
+
+
+def build_training_config(
+    preset: str = "default",
+    overrides: dict[str, Any] | None = None,
+) -> TrainingConfig:
+    if preset not in TRAINING_PRESETS:
+        raise ValueError(f"Unknown training preset: {preset}")
+
+    payload = TrainingConfig().to_dict()
+    payload.update(TRAINING_PRESETS[preset])
+    if overrides:
+        for key, value in overrides.items():
+            if value is not None and key in payload:
+                payload[key] = value
+    return TrainingConfig(**payload)
+
+
+def namespace_to_config(args: argparse.Namespace) -> TrainingConfig:
+    return TrainingConfig(
+        model_name=args.model_name,
+        output_dir=args.output_dir,
+        dataset_size=args.dataset_size,
+        max_steps=args.max_steps,
+        batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        num_generations=args.num_generations,
+        max_seq_length=args.max_seq_length,
+        max_prompt_length=args.max_prompt_length,
+        max_completion_length=args.max_completion_length,
+        learning_rate=args.learning_rate,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        disable_4bit=args.disable_4bit,
+        bf16=args.bf16,
+        baseline_eval=args.baseline_eval,
+        evaluation_episodes=args.evaluation_episodes,
+        eval_max_new_tokens=args.eval_max_new_tokens,
+        disable_wandb=args.disable_wandb,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
+        generator_mode=args.generator_mode,
+        non_deterministic_generator=args.non_deterministic_generator,
+    )
 
 
 @dataclass
@@ -395,6 +483,11 @@ def generate_completion(
     *,
     max_new_tokens: int,
 ) -> str:
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError("`torch` is required to run generation for evaluation or trained-policy execution.") from exc
+
     rendered = render_prompt(tokenizer, prompt)
     inputs = tokenizer(rendered, return_tensors="pt")
     device = getattr(model, "device", None)
@@ -503,7 +596,10 @@ def print_evaluation_summary(baseline: dict[str, Any], trained: dict[str, Any]) 
         print(f"{tier:<12} {baseline.get(tier, 0.0):>10.3f} {trained.get(tier, 0.0):>10.3f}")
 
 
-def run_training(args: argparse.Namespace) -> None:
+def run_training(config: TrainingConfig | argparse.Namespace) -> dict[str, Any]:
+    if isinstance(config, argparse.Namespace):
+        config = namespace_to_config(config)
+
     try:
         from trl import GRPOConfig, GRPOTrainer
         from unsloth import FastLanguageModel, PatchFastRL
@@ -512,68 +608,68 @@ def run_training(args: argparse.Namespace) -> None:
             "Training dependencies are missing. Install `trl` and `unsloth` before running GRPO training."
         ) from exc
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     PatchFastRL("GRPO", FastLanguageModel)
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=args.model_name,
-        max_seq_length=args.max_seq_length,
-        load_in_4bit=not args.disable_4bit,
+        model_name=config.model_name,
+        max_seq_length=config.max_seq_length,
+        load_in_4bit=not config.disable_4bit,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = FastLanguageModel.get_peft_model(
         model,
-        r=args.lora_rank,
+        r=config.lora_rank,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-        lora_alpha=args.lora_alpha,
+        lora_alpha=config.lora_alpha,
         lora_dropout=0.0,
     )
 
     curriculum = CurriculumManager()
     controller = GeneratorController(
-        mode="reward_aware" if args.generator_mode == "reward_aware" else "heuristic",
-        deterministic=not args.non_deterministic_generator,
+        mode="reward_aware" if config.generator_mode == "reward_aware" else "heuristic",
+        deterministic=not config.non_deterministic_generator,
     )
     logger = TrainingLogger(
         output_dir=output_dir,
         family_names=controller.family_names,
-        use_wandb=not args.disable_wandb,
-        wandb_project=args.wandb_project,
-        wandb_run_name=args.wandb_run_name,
+        use_wandb=not config.disable_wandb,
+        wandb_project=config.wandb_project,
+        wandb_run_name=config.wandb_run_name,
     )
 
     baseline_summary = {"easy": 0.0, "medium": 0.0, "hard": 0.0, "overall": 0.0}
     trained_summary = {"easy": 0.0, "medium": 0.0, "hard": 0.0, "overall": 0.0}
 
-    if args.baseline_eval:
+    if config.baseline_eval:
         FastLanguageModel.for_inference(model)
         baseline_summary = run_policy_evaluation(
             model=model,
             tokenizer=tokenizer,
             generator_mode=controller.mode,
-            deterministic_generator=not args.non_deterministic_generator,
-            episodes=args.evaluation_episodes,
+            deterministic_generator=not config.non_deterministic_generator,
+            episodes=config.evaluation_episodes,
             logger=logger,
             phase="baseline_eval",
-            max_new_tokens=args.eval_max_new_tokens,
+            max_new_tokens=config.eval_max_new_tokens,
         )
         print(f"[baseline_eval] {json.dumps(baseline_summary)}")
 
     training_args = GRPOConfig(
-        output_dir=args.output_dir,
-        learning_rate=args.learning_rate,
-        per_device_train_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        num_generations=args.num_generations,
-        max_prompt_length=args.max_prompt_length,
-        max_completion_length=args.max_completion_length,
-        max_steps=args.max_steps,
+        output_dir=str(output_dir),
+        learning_rate=config.learning_rate,
+        per_device_train_batch_size=config.batch_size,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        num_generations=config.num_generations,
+        max_prompt_length=config.max_prompt_length,
+        max_completion_length=config.max_completion_length,
+        max_steps=config.max_steps,
         logging_steps=1,
-        bf16=args.bf16,
+        bf16=config.bf16,
         report_to=[],
     )
 
@@ -581,24 +677,24 @@ def run_training(args: argparse.Namespace) -> None:
         model=model,
         reward_funcs=[build_reward_func(curriculum, controller, logger)],
         args=training_args,
-        train_dataset=build_dataset(args.dataset_size, controller, curriculum),
+        train_dataset=build_dataset(config.dataset_size, controller, curriculum),
     )
     trainer.train()
 
-    model.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
+    model.save_pretrained(str(output_dir))
+    tokenizer.save_pretrained(str(output_dir))
 
-    if args.baseline_eval:
+    if config.baseline_eval:
         FastLanguageModel.for_inference(model)
         trained_summary = run_policy_evaluation(
             model=model,
             tokenizer=tokenizer,
             generator_mode=controller.mode,
-            deterministic_generator=not args.non_deterministic_generator,
-            episodes=args.evaluation_episodes,
+            deterministic_generator=not config.non_deterministic_generator,
+            episodes=config.evaluation_episodes,
             logger=logger,
             phase="trained_eval",
-            max_new_tokens=args.eval_max_new_tokens,
+            max_new_tokens=config.eval_max_new_tokens,
         )
         print(f"[trained_eval] {json.dumps(trained_summary)}")
         print_evaluation_summary(baseline_summary, trained_summary)
@@ -606,6 +702,14 @@ def run_training(args: argparse.Namespace) -> None:
     csv_path = logger.write_csv()
     logger.close()
     print(f"[artifacts] reward curve CSV written to {csv_path}")
+
+    return {
+        "config": config.to_dict(),
+        "output_dir": str(output_dir.resolve()),
+        "reward_curve_csv": str(csv_path.resolve()),
+        "baseline_summary": baseline_summary,
+        "trained_summary": trained_summary,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:

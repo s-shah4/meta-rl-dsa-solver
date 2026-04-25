@@ -40,5 +40,30 @@ class AdaptEnvClient:
         response.raise_for_status()
         return response.json()
 
+    def train(self, **params: Any) -> dict[str, Any]:
+        response = self._client.post("/train", json=params)
+        response.raise_for_status()
+        return response.json()
+
+    def train_status(self) -> dict[str, Any]:
+        response = self._client.get("/train/status")
+        response.raise_for_status()
+        return response.json()
+
+    def model_status(self) -> dict[str, Any]:
+        response = self._client.get("/model/status")
+        response.raise_for_status()
+        return response.json()
+
+    def run_trained_policy(self, **params: Any) -> dict[str, Any]:
+        response = self._client.post("/run-trained-policy", json=params)
+        response.raise_for_status()
+        return response.json()
+
+    def generate_code(self, **params: Any) -> dict[str, Any]:
+        response = self._client.post("/generate-code", json=params)
+        response.raise_for_status()
+        return response.json()
+
 
 __all__ = ["AdaptEnvClient"]

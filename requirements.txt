@@ -2,3 +2,6 @@ openenv
 fastapi 
 uvicorn 
 pydantic
+huggingface_hub
+transformers
+peft
