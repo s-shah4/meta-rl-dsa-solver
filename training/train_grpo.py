@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -552,6 +553,46 @@ def extract_optimization_hints(feedback: str) -> list[str]:
     return hints
 
 
+def build_timing_summary(
+    *,
+    config: TrainingConfig,
+    wall_clock_seconds: float,
+    completed_steps: int,
+    train_episode_count: int,
+) -> dict[str, Any]:
+    wall_clock_seconds = max(float(wall_clock_seconds), 0.0)
+    completed_steps = max(int(completed_steps), 0)
+    train_episode_count = max(int(train_episode_count), 0)
+
+    summary: dict[str, Any] = {
+        "wall_clock_seconds": round(wall_clock_seconds, 2),
+        "wall_clock_minutes": round(wall_clock_seconds / 60.0, 2),
+        "wall_clock_hours": round(wall_clock_seconds / 3600.0, 3),
+        "completed_steps": completed_steps,
+        "train_episode_count": train_episode_count,
+        "configured_dataset_size": int(config.dataset_size),
+        "configured_batch_size": int(config.batch_size),
+        "configured_gradient_accumulation_steps": int(config.gradient_accumulation_steps),
+        "configured_num_generations": int(config.num_generations),
+    }
+
+    if completed_steps > 0 and wall_clock_seconds > 0:
+        summary["avg_seconds_per_step"] = round(wall_clock_seconds / completed_steps, 2)
+        summary["steps_per_hour"] = round((completed_steps * 3600.0) / wall_clock_seconds, 2)
+    else:
+        summary["avg_seconds_per_step"] = None
+        summary["steps_per_hour"] = None
+
+    if train_episode_count > 0 and wall_clock_seconds > 0:
+        summary["avg_seconds_per_episode"] = round(wall_clock_seconds / train_episode_count, 2)
+        summary["episodes_per_hour"] = round((train_episode_count * 3600.0) / wall_clock_seconds, 2)
+    else:
+        summary["avg_seconds_per_episode"] = None
+        summary["episodes_per_hour"] = None
+
+    return summary
+
+
 def build_reward_func(
     curriculum: CurriculumManager,
     controller: GeneratorController,
@@ -998,6 +1039,8 @@ def run_training(
     if isinstance(config, argparse.Namespace):
         config = namespace_to_config(config)
 
+    wall_clock_started_at = time.perf_counter()
+
     try:
         import torch
     except ImportError as exc:
@@ -1264,12 +1307,30 @@ def run_training(
         )
 
     csv_path = logger.write_csv()
+    timing_summary = build_timing_summary(
+        config=config,
+        wall_clock_seconds=time.perf_counter() - wall_clock_started_at,
+        completed_steps=int(config.max_steps),
+        train_episode_count=int(controller.history.get("episode_index", 0)),
+    )
+    emit_progress(
+        {
+            "phase": "completed",
+            "status": "succeeded",
+            "completed_steps": int(config.max_steps),
+            "total_steps": int(config.max_steps),
+            "current_epoch": float(config.max_steps),
+            "train_episode_index": int(controller.history.get("episode_index", 0)),
+            "timing_summary": timing_summary,
+        }
+    )
     trace_artifact_paths = logger.finalize_trace_artifacts(
         reward_curve_csv=csv_path,
         final_metrics={
             "baseline_summary": baseline_summary,
             "trained_summary": trained_summary,
             "completed_steps": int(config.max_steps),
+            "timing_summary": timing_summary,
         },
     )
     logger.close()
@@ -1291,6 +1352,7 @@ def run_training(
         "baseline_summary": baseline_summary,
         "trained_summary": trained_summary,
         "completed_steps": int(config.max_steps),
+        "timing_summary": timing_summary,
     }
 
 

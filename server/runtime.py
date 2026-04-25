@@ -32,6 +32,13 @@ def _iso_or_none(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
+def _elapsed_seconds(started_at: datetime | None, finished_at: datetime | None) -> float | None:
+    if started_at is None:
+        return None
+    completed_at = finished_at or _utc_now()
+    return round(max((completed_at - started_at).total_seconds(), 0.0), 2)
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
@@ -100,6 +107,7 @@ class TrainingJobState:
     last_execution_status: str | None = None
     baseline_summary: dict[str, Any] = field(default_factory=dict)
     trained_summary: dict[str, Any] = field(default_factory=dict)
+    timing_summary: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     traceback: str | None = None
 
@@ -107,6 +115,10 @@ class TrainingJobState:
         payload = asdict(self)
         payload["started_at"] = _iso_or_none(self.started_at)
         payload["finished_at"] = _iso_or_none(self.finished_at)
+        elapsed_seconds = _elapsed_seconds(self.started_at, self.finished_at)
+        payload["elapsed_seconds"] = elapsed_seconds
+        payload["elapsed_minutes"] = round(elapsed_seconds / 60.0, 2) if elapsed_seconds is not None else None
+        payload["elapsed_hours"] = round(elapsed_seconds / 3600.0, 3) if elapsed_seconds is not None else None
         return payload
 
 
@@ -548,6 +560,7 @@ class SpaceTrainingManager:
                 last_execution_status=payload.get("last_execution_status"),
                 baseline_summary=payload.get("baseline_summary", {}),
                 trained_summary=payload.get("trained_summary", {}),
+                timing_summary=payload.get("timing_summary", {}),
                 error=payload.get("error"),
                 traceback=payload.get("traceback"),
             )
@@ -720,6 +733,7 @@ class SpaceTrainingManager:
                 self._job.epochs_remaining = 0.0
                 self._job.baseline_summary = summary.get("baseline_summary", {})
                 self._job.trained_summary = summary.get("trained_summary", {})
+                self._job.timing_summary = summary.get("timing_summary", {})
                 self._job.error = None
                 self._job.traceback = None
                 self._persist_status()

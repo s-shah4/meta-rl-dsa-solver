@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from training.train_grpo import build_training_config, resolve_precision_policy
+from training.train_grpo import build_timing_summary, build_training_config, resolve_precision_policy
 from verifier.metrics import compute_episode_reward
 
 
@@ -55,6 +55,16 @@ def main() -> None:
     cpu_policy = resolve_precision_policy(smoke_config, FakeTorch(available=False, bf16_supported=False))
     assert cpu_policy["precision_mode"] == "fp32"
     assert cpu_policy["load_in_4bit"] is False
+
+    timing_summary = build_timing_summary(
+        config=smoke_config,
+        wall_clock_seconds=180.0,
+        completed_steps=6,
+        train_episode_count=12,
+    )
+    assert timing_summary["wall_clock_minutes"] == 3.0
+    assert timing_summary["avg_seconds_per_step"] == 30.0
+    assert timing_summary["episodes_per_hour"] == 240.0
 
     reward, components = compute_episode_reward(
         pass_rate=1.0,

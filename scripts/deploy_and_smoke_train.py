@@ -42,6 +42,20 @@ def pretty_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "n/a"
+    total_seconds = max(float(seconds), 0.0)
+    hours = int(total_seconds // 3600)
+    minutes = int((total_seconds % 3600) // 60)
+    secs = round(total_seconds % 60, 1)
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 def api_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
@@ -240,6 +254,7 @@ def summarize_training_status(payload: dict[str, Any]) -> str:
     difficulty = payload.get("current_difficulty")
     problem_family = payload.get("last_problem_family")
     reward = payload.get("last_reward")
+    elapsed_minutes = payload.get("elapsed_minutes")
     pieces = [
         f"status={status}",
         f"phase={phase}",
@@ -251,7 +266,41 @@ def summarize_training_status(payload: dict[str, Any]) -> str:
         pieces.append(f"family={problem_family}")
     if reward is not None:
         pieces.append(f"reward={reward}")
+    if elapsed_minutes is not None:
+        pieces.append(f"elapsed={elapsed_minutes}m")
     return " ".join(pieces)
+
+
+def print_runtime_baseline(payload: dict[str, Any]) -> None:
+    timing = payload.get("timing_summary") or {}
+    wall_clock_seconds = timing.get("wall_clock_seconds")
+    if wall_clock_seconds is None:
+        wall_clock_seconds = payload.get("elapsed_seconds")
+    if wall_clock_seconds is None:
+        return
+
+    avg_seconds_per_step = timing.get("avg_seconds_per_step")
+    avg_seconds_per_episode = timing.get("avg_seconds_per_episode")
+    steps_per_hour = timing.get("steps_per_hour")
+    episodes_per_hour = timing.get("episodes_per_hour")
+
+    print_info(
+        "Smoke runtime baseline: "
+        f"wall_clock={format_duration(float(wall_clock_seconds))}, "
+        f"avg_step={avg_seconds_per_step}s, "
+        f"avg_episode={avg_seconds_per_episode}s"
+    )
+
+    if steps_per_hour is not None or episodes_per_hour is not None:
+        six_hour_steps = round(float(steps_per_hour) * 6) if steps_per_hour is not None else None
+        seven_hour_steps = round(float(steps_per_hour) * 7) if steps_per_hour is not None else None
+        six_hour_episodes = round(float(episodes_per_hour) * 6) if episodes_per_hour is not None else None
+        seven_hour_episodes = round(float(episodes_per_hour) * 7) if episodes_per_hour is not None else None
+        print_info(
+            "Window estimate at current smoke throughput: "
+            f"6h -> steps={six_hour_steps}, episodes={six_hour_episodes}; "
+            f"7h -> steps={seven_hour_steps}, episodes={seven_hour_episodes}"
+        )
 
 
 def ensure_no_active_training(base_url: str) -> None:
@@ -302,6 +351,7 @@ def poll_training_status(
         if status == "succeeded":
             print_info("Training succeeded. Final payload follows.")
             print(pretty_json(payload), flush=True)
+            print_runtime_baseline(payload)
             return payload
 
         time.sleep(poll_interval_seconds)
