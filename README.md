@@ -1,81 +1,166 @@
-# meta-rl-dsa-solver
+---
+title: ADAPT DSA Tutor OpenEnv
+sdk: docker
+pinned: false
+app_port: 7860
+base_path: /web
+tags:
+  - openenv
+  - reinforcement-learning
+  - code-generation
+---
 
-ADAPT (Adversarial DSA Tutor) is a minimal reinforcement learning environment for coding tasks. The current V0 environment is a pure Python class with no API dependency, so it can be used directly from a training loop with `env.reset()` and `env.step(...)`.
+# ADAPT DSA Tutor OpenEnv
 
-## Current V0
+ADAPT, the Adversarial DSA Tutor, is an OpenEnv-compliant RLVR environment for training code-generation agents on small DSA tasks. The agent receives a problem prompt, examples, and visible tests, then submits Python code. The environment runs the code against visible and hidden tests and returns reward, pass-rate metrics, execution status, and feedback.
 
-- Fixed DSA problem: given an integer `n`, return `n * 2`
-- Single test input: `5`
-- Expected output: `10`
-- Binary reward: `1.0` for correct output, `0.0` otherwise
-- Subprocess execution with a 2 second timeout
+This repo now focuses on the environment layer only. Verifier work and training scripts are owned separately.
 
-## Run a Smoke Test
+## Why This Environment
 
-From this directory:
+The hackathon asks for OpenEnv environments that can improve LLM behavior through verifiable interaction. ADAPT targets a simple but useful skill loop:
+
+```text
+agent writes code -> environment executes it -> hidden tests and reward signals score it -> trainer improves the agent
+```
+
+The differentiator is curriculum-ready DSA practice: each episode carries a problem id and difficulty tier so training can track per-tier success instead of only aggregate reward.
+
+## OpenEnv Interface
+
+The environment uses the latest OpenEnv API shape:
+
+- `AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState])`
+- `reset()` returns a typed observation.
+- `step(action)` accepts an `AdaptAction` with a Python `code` string.
+- `state` exposes episode id, step count, current problem id, difficulty, and recent metrics.
+
+`openenv.yaml` points to:
+
+```yaml
+app: server.app:app
+port: 7860
+```
+
+## Action
+
+```python
+{
+    "code": "n = int(input())\nprint(n * 2)"
+}
+```
+
+## Observation
+
+Reset and step observations include:
+
+- problem statement
+- input format
+- constraints
+- examples
+- visible tests
+- problem id
+- difficulty tier
+- feedback
+- pass rate, visible pass rate, and hidden pass rate
+- syntax/runtime/timeout status
+- reward components
+
+Hidden test inputs and expected outputs are never returned in observations.
+
+## Reward
+
+Reward is clipped to `[0.0, 1.0]` and combines multiple environment-level signals:
+
+- correctness from visible and hidden pass rate
+- syntax validity
+- clean execution
+- output format compliance
+- timeout penalty
+- runtime error penalty
+- static safety rejection for dangerous imports such as `os`, `subprocess`, `socket`, `pathlib`, and `shutil`
+
+If `verifier.verifier.verify(code, test_cases)` exists, the environment can use it as an optional reward augmentation. If the verifier is absent, the environment still works using executor-derived reward.
+
+## Local Setup
+
+Use Python `3.10+`.
 
 ```powershell
 cd C:\Users\kaust\PycharmProjects\meta-rl-dsa-solver
-python3 -c "from environment import AdaptEnv; env=AdaptEnv(); print(env.reset()); print(env.step('n=int(input()); print(n*2)'))"
+python -m venv .venv
+.\.venv\Scripts\pip install -e .
 ```
 
-Expected reward:
-
-```text
-1.0
-```
-
-## Use in Python
-
-```python
-from environment import AdaptEnv
-
-env = AdaptEnv()
-
-obs = env.reset()
-print(obs)
-
-code = "n=int(input()); print(n*2)"
-result = env.step(code)
-
-print(result)
-assert result["reward"] == 1.0
-```
-
-## Check Failure Cases
-
-Wrong answer:
+For this local machine, the existing checked-out OpenEnv repo can also be used during development:
 
 ```powershell
-python3 -c "from environment import AdaptEnv; env=AdaptEnv(); env.reset(); print(env.step('print(0)'))"
+$env:PYTHONPATH="C:\Users\kaust\PycharmProjects\OpenEnv\src;$PWD"
 ```
 
-Timeout:
+## Smoke Tests
+
+Run the local smoke test:
 
 ```powershell
-python3 -c "from environment import AdaptEnv; env=AdaptEnv(); env.reset(); print(env.step('while True: pass'))"
+python test.py
 ```
 
-## Environment Contract
+Check syntax:
 
-`reset()` returns:
-
-```python
-{
-    "problem": "Given an integer n, return n * 2",
-    "input": "5",
-}
+```powershell
+python -m py_compile models.py env\adapt_env.py env\executor.py env\test_cases.py server\app.py
 ```
 
-`step(action: str)` returns:
+Start the OpenEnv server:
 
-```python
-{
-    "observation": "<program output or error>",
-    "reward": 1.0,
-    "done": True,
-    "info": {},
-}
+```powershell
+uvicorn server.app:app --host 0.0.0.0 --port 7860
 ```
 
-The implementation keeps the verifier pluggable so later versions can replace the single expected-output check with hidden tests, randomized inputs, or adaptive curriculum logic.
+Useful endpoints:
+
+- `GET /health`
+- `GET /schema`
+- `POST /reset`
+- `POST /step`
+- `GET /state`
+
+Example step request:
+
+```powershell
+curl -X POST http://localhost:7860/step -H "Content-Type: application/json" -d "{\"action\":{\"code\":\"n=int(input())\nprint(n*2)\"}}"
+```
+
+Validate with OpenEnv once dependencies are installed:
+
+```powershell
+openenv validate .
+```
+
+## Hugging Face Spaces
+
+This repo is Docker Space ready:
+
+```powershell
+openenv push --repo-id <your-hf-username>/adapt-dsa-tutor
+```
+
+Before final submission, add:
+
+- live Hugging Face Space link
+- training reward/loss plots from Disha's run
+- before/after code example showing a problem the model failed before training and solved after training
+- mini-blog or short video link
+
+## Current Problem Bank
+
+The environment includes a lightweight curated bank:
+
+- `easy_double`
+- `easy_sum_two`
+- `medium_maximum`
+- `medium_count_even`
+- `hard_reverse_words`
+
+This is intentionally small for submission-minimum stability. Later work can expand it to 30-50 tiered problems without changing the OpenEnv API.

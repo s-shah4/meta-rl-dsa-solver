@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adapt-dsa-tutor"
+version = "0.2.0"
+description = "OpenEnv-compliant adversarial DSA tutor environment for RLVR code generation."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core>=0.2.3",
+    "fastapi>=0.104.0",
+    "pydantic>=2.0.0",
+    "uvicorn>=0.24.0",
+    "httpx>=0.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+server = "server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["env", "server"]
+py-modules = ["app", "client", "models"]

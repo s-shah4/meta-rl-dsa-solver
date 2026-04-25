@@ -1,0 +1,8 @@
+.git
+.idea
+venv
+__pycache__
+*.pyc
+outputs
+.adapt_tmp
+.pip-tmp
