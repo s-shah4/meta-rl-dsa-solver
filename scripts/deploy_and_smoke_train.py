@@ -143,6 +143,7 @@ def wait_for_space_health(
     push_started_at = time.time()
     previous_payload = try_get_space_health(health_url)
     deployment_transition_seen = previous_payload is None
+    fallback_notice_emitted = False
     consecutive_healthy_checks = 0
 
     while time.time() < deadline:
@@ -158,7 +159,9 @@ def wait_for_space_health(
         if previous_payload != payload:
             deployment_transition_seen = True
 
-        if not deployment_transition_seen:
+        waited_long_enough = (time.time() - push_started_at) >= min_deploy_wait_seconds
+
+        if not deployment_transition_seen and not waited_long_enough:
             print(
                 "Space is still serving the pre-push health payload; waiting for the new deployment to take over.",
                 flush=True,
@@ -167,7 +170,14 @@ def wait_for_space_health(
             time.sleep(poll_interval_seconds)
             continue
 
-        waited_long_enough = (time.time() - push_started_at) >= min_deploy_wait_seconds
+        if not deployment_transition_seen and waited_long_enough and not fallback_notice_emitted:
+            print(
+                "No observable health payload transition detected after the minimum deploy wait. "
+                "Falling back to healthy-check stabilization.",
+                flush=True,
+            )
+            fallback_notice_emitted = True
+
         if not waited_long_enough:
             remaining = max(0, min_deploy_wait_seconds - int(time.time() - push_started_at))
             print(
