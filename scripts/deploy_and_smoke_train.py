@@ -16,6 +16,8 @@ DEFAULT_REMOTE = "space"
 DEFAULT_REMOTE_BRANCH = "main"
 DEFAULT_POLL_INTERVAL_SECONDS = 10
 DEFAULT_TIMEOUT_SECONDS = 60 * 30
+DEFAULT_REQUIRED_HEALTHY_CHECKS = 3
+DEFAULT_MIN_DEPLOY_WAIT_SECONDS = 30
 
 
 def run_command(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -83,26 +85,77 @@ def http_json(method: str, url: str, payload: dict[str, Any] | None = None) -> d
         raise RuntimeError(f"Request to {url} failed: {exc}") from exc
 
 
-def wait_for_space_health(base_url: str, timeout_seconds: int, poll_interval_seconds: int) -> None:
+def try_get_space_health(health_url: str) -> dict[str, Any] | None:
+    try:
+        return http_json("GET", health_url)
+    except RuntimeError:
+        return None
+
+
+def wait_for_space_health(
+    base_url: str,
+    timeout_seconds: int,
+    poll_interval_seconds: int,
+    required_healthy_checks: int,
+    min_deploy_wait_seconds: int,
+) -> None:
     health_url = f"{base_url.rstrip('/')}/health"
     deadline = time.time() + timeout_seconds
+    push_started_at = time.time()
+    previous_payload = try_get_space_health(health_url)
+    deployment_transition_seen = previous_payload is None
+    consecutive_healthy_checks = 0
 
     while time.time() < deadline:
         try:
             payload = http_json("GET", health_url)
         except RuntimeError as exc:
-            print(f"Waiting for Space health: {exc}", flush=True)
+            deployment_transition_seen = True
+            consecutive_healthy_checks = 0
+            print(f"Waiting for Space deployment: {exc}", flush=True)
+            time.sleep(poll_interval_seconds)
+            continue
+
+        if previous_payload != payload:
+            deployment_transition_seen = True
+
+        if not deployment_transition_seen:
+            print(
+                "Space is still serving the pre-push health payload; waiting for the new deployment to take over.",
+                flush=True,
+            )
+            previous_payload = payload
+            time.sleep(poll_interval_seconds)
+            continue
+
+        waited_long_enough = (time.time() - push_started_at) >= min_deploy_wait_seconds
+        if not waited_long_enough:
+            remaining = max(0, min_deploy_wait_seconds - int(time.time() - push_started_at))
+            print(
+                f"Deployment transition detected. Waiting {remaining}s more for the Space to stabilize.",
+                flush=True,
+            )
+            previous_payload = payload
             time.sleep(poll_interval_seconds)
             continue
 
         if payload.get("status") == "healthy":
-            print(f"Space is healthy: {payload}", flush=True)
-            return
+            consecutive_healthy_checks += 1
+            print(
+                f"Space healthy check {consecutive_healthy_checks}/{required_healthy_checks}: {payload}",
+                flush=True,
+            )
+            if consecutive_healthy_checks >= required_healthy_checks:
+                print("Space deployment looks stable. Starting smoke training.", flush=True)
+                return
+        else:
+            consecutive_healthy_checks = 0
+            print(f"Space health not ready yet: {payload}", flush=True)
 
-        print(f"Space health not ready yet: {payload}", flush=True)
+        previous_payload = payload
         time.sleep(poll_interval_seconds)
 
-    raise TimeoutError(f"Space did not become healthy within {timeout_seconds} seconds.")
+    raise TimeoutError(f"Space did not finish deploying within {timeout_seconds} seconds.")
 
 
 def start_smoke_training(base_url: str) -> dict[str, Any]:
@@ -172,6 +225,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TIMEOUT_SECONDS,
         help="Overall timeout for Space health and smoke training completion.",
     )
+    parser.add_argument(
+        "--required-healthy-checks",
+        type=int,
+        default=DEFAULT_REQUIRED_HEALTHY_CHECKS,
+        help="How many consecutive healthy checks to require before starting training.",
+    )
+    parser.add_argument(
+        "--min-deploy-wait-seconds",
+        type=int,
+        default=DEFAULT_MIN_DEPLOY_WAIT_SECONDS,
+        help="Minimum number of seconds to wait after the push before treating the Space as fully deployed.",
+    )
     return parser
 
 
@@ -189,6 +254,8 @@ def main(argv: list[str] | None = None) -> int:
             base_url=args.base_url,
             timeout_seconds=args.timeout_seconds,
             poll_interval_seconds=args.poll_interval_seconds,
+            required_healthy_checks=args.required_healthy_checks,
+            min_deploy_wait_seconds=args.min_deploy_wait_seconds,
         )
         start_smoke_training(args.base_url)
         final_status = poll_training_status(
