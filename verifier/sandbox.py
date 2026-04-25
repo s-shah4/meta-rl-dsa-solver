@@ -1,9 +1,10 @@
+import os
 import subprocess
 import tempfile
-import os
 
 
 def run_code(code: str, stdin: str, timeout: int = 2):
+    path = None
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
             f.write(code)
@@ -17,8 +18,6 @@ def run_code(code: str, stdin: str, timeout: int = 2):
             timeout=timeout,
         )
 
-        os.remove(path)
-
         if result.returncode != 0:
             return False, result.stderr.strip()
 
@@ -29,3 +28,7 @@ def run_code(code: str, stdin: str, timeout: int = 2):
 
     except Exception as e:
         return False, f"ERROR: {e}"
+
+    finally:
+        if path and os.path.exists(path):
+            os.remove(path)
