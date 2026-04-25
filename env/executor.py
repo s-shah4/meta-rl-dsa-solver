@@ -8,14 +8,15 @@ from pathlib import Path
 from uuid import uuid4
 
 
-TIMEOUT_SECONDS = 2
+TIMEOUT_SECONDS = 1
 
 
-def run_code(code: str, input_data: str) -> dict:
+def run_code(code: str, input_data: str, timeout_seconds: int | float | None = None) -> dict:
     temp_parent = Path(os.getenv("ADAPT_TMP_DIR", ".adapt_tmp")).resolve()
     temp_parent.mkdir(parents=True, exist_ok=True)
     tmpdir = temp_parent / f"run_{uuid4().hex}"
     tmpdir.mkdir()
+    timeout_value = TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
 
     try:
         file_path = Path(tmpdir) / "submission.py"
@@ -27,7 +28,7 @@ def run_code(code: str, input_data: str) -> dict:
                 input=input_data,
                 text=True,
                 capture_output=True,
-                timeout=TIMEOUT_SECONDS,
+                timeout=timeout_value,
             )
         except subprocess.TimeoutExpired as exc:
             return {

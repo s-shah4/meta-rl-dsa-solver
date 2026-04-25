@@ -23,8 +23,6 @@ You will receive:
 - a problem statement
 - input format
 - constraints
-- worked examples
-- visible tests
 - feedback from previous attempts
 
 Reply with ONLY runnable Python code. The code must read from stdin and print to stdout.
@@ -59,12 +57,11 @@ def extract_code(response_text: str) -> str:
 def build_user_prompt(observation: dict[str, Any]) -> str:
     payload = {
         "problem_id": observation["problem_id"],
+        "problem_type": observation["problem_type"],
         "difficulty": observation["difficulty"],
         "problem": observation["problem"],
         "input_format": observation["input_format"],
         "constraints": observation["constraints"],
-        "examples": observation["examples"],
-        "visible_tests": observation["visible_tests"],
         "feedback": observation["feedback"],
     }
     return json.dumps(payload, indent=2)

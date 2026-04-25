@@ -27,12 +27,11 @@ class AdaptAction(Action):
 
 class AdaptObservation(Observation):
     problem_id: str = Field(default="", description="Current problem identifier.")
+    problem_type: str = Field(default="", description="Current generated problem family.")
     difficulty: str = Field(default="", description="Current curriculum difficulty tier.")
     problem: str = Field(default="", description="Problem statement shown to the agent.")
     input_format: str = Field(default="", description="Expected stdin format.")
     constraints: str = Field(default="", description="Problem constraints.")
-    examples: list[dict[str, str]] = Field(default_factory=list)
-    visible_tests: list[dict[str, str]] = Field(default_factory=list)
     feedback: str = Field(default="", description="Human-readable execution feedback.")
     pass_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     visible_pass_rate: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -41,14 +40,22 @@ class AdaptObservation(Observation):
     execution_status: str = Field(default="not_run")
     timeout_count: int = Field(default=0, ge=0)
     runtime_error_count: int = Field(default=0, ge=0)
+    invalid_output_count: int = Field(default=0, ge=0)
+    wrong_answer_count: int = Field(default=0, ge=0)
     format_compliance: float = Field(default=0.0, ge=0.0, le=1.0)
     reward_components: dict[str, float] = Field(default_factory=dict)
+    generator_reward_signal: float = Field(default=0.0)
 
 
 class AdaptState(State):
     problem_id: str = Field(default="")
+    problem_type: str = Field(default="")
     difficulty: str = Field(default="")
+    generator_mode: str = Field(default="heuristic")
+    generated_problem: dict[str, str] = Field(default_factory=dict)
     last_reward: float = Field(default=0.0)
     last_pass_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     last_feedback: str = Field(default="")
+    generator_reward_signal: float = Field(default=0.0)
+    history: dict[str, Any] = Field(default_factory=dict)
     recent_metrics: dict[str, Any] = Field(default_factory=dict)

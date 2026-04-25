@@ -4,8 +4,7 @@ import ast
 from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
-from env.executor import run_code
-from env.test_cases import get_test_cases, load_problem, split_test_cases
+from env.generator import DIFFICULTY_LABELS, GeneratorAgent, generator_reward, validate_problem
 from models import AdaptAction, AdaptObservation, AdaptState
 
 try:
@@ -23,25 +22,34 @@ except ImportError:
 
 
 FORBIDDEN_IMPORTS = {"os", "pathlib", "shutil", "socket", "subprocess"}
-DIFFICULTY_LABELS = {1: "easy", 2: "medium", 3: "hard"}
 
 
 class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
     SUPPORTS_CONCURRENT_SESSIONS = True
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        generator: GeneratorAgent | None = None,
+        generator_mode: str = "heuristic",
+    ) -> None:
         super().__init__()
-        self._state = AdaptState(episode_id=str(uuid4()), step_count=0)
+        self.generator = generator or GeneratorAgent()
+        self.generator_mode = generator_mode
         self.problem: dict[str, Any] = {}
         self.test_cases: list[dict[str, str]] = []
-        self.visible_tests: list[dict[str, str]] = []
-        self.hidden_tests: list[dict[str, str]] = []
         self.last_results: list[dict[str, Any]] = []
-        self.history: list[float] = []
         self.max_history = 20
-        self.difficulty: int = 1
         self.min_difficulty = 1
         self.max_difficulty = 3
+        self.difficulty: int = 1
+        self.history: dict[str, Any] = {
+            "recent_pass_rates": [],
+            "problem_types": [],
+            "generator_rewards": [],
+            "problem_signatures": [],
+            "episode_index": 0,
+        }
+        self._state = AdaptState(episode_id=str(uuid4()), step_count=0, generator_mode=self.generator_mode)
 
     def reset(
         self,
@@ -49,33 +57,38 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         episode_id: str | None = None,
         problem_id: str | None = None,
         difficulty: str | None = None,
+        generated_problem: dict[str, Any] | None = None,
+        generator_mode: str | None = None,
         **_: Any,
     ) -> AdaptObservation:
         del seed
+        if generator_mode is not None:
+            self.generator_mode = generator_mode
         if difficulty is not None:
             self.difficulty = self._difficulty_to_tier(difficulty)
-        elif len(self.history) >= 5:
-            success_rate = self._get_success_rate()
-            if success_rate > 0.7:
-                self.difficulty = min(self.difficulty + 1, self.max_difficulty)
-            elif success_rate < 0.3:
-                self.difficulty = max(self.difficulty - 1, self.min_difficulty)
+        elif self.history["recent_pass_rates"]:
+            self.difficulty = self._recommend_next_difficulty()
 
-        difficulty_label = self._tier_to_difficulty(self.difficulty)
-        self.problem = load_problem(problem_id=problem_id, difficulty=difficulty_label)
-        self.test_cases = get_test_cases(self.problem, self.difficulty)
-        self.visible_tests, self.hidden_tests = split_test_cases(self.test_cases)
+        self.problem = self._load_problem(
+            generated_problem=generated_problem,
+            problem_id=problem_id,
+        )
+        self.test_cases = [dict(test_case) for test_case in self.problem["test_cases"]]
         self.last_results = []
         self._state = AdaptState(
             episode_id=episode_id or str(uuid4()),
             step_count=0,
             problem_id=self.problem["problem_id"],
-            difficulty=difficulty_label,
+            problem_type=self.problem.get("problem_type", ""),
+            difficulty=self.problem.get("difficulty_label", self._tier_to_difficulty(self.difficulty)),
+            generator_mode=self.generator_mode,
+            generated_problem=self._public_problem_view(),
         )
         return self._build_observation(
             reward=0.0,
             done=False,
             feedback="Submit Python code that reads stdin and prints the required answer.",
+            execution_status="ready",
         )
 
     def step(
@@ -97,9 +110,9 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
                 feedback=f"Syntax error: {syntax_error}",
                 syntax_valid=False,
                 execution_status="syntax_error",
+                reward_components={"correctness": 0.0, "format": 0.0},
             )
-            self._update_history(observation.reward)
-            self._record_metrics(observation)
+            self._finalize_episode(observation)
             return observation
 
         safety_ok, safety_error = self._check_safety(action.code)
@@ -110,36 +123,34 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
                 feedback=safety_error,
                 syntax_valid=True,
                 execution_status="safety_violation",
+                reward_components={"correctness": 0.0, "format": 0.0},
             )
-            self._update_history(observation.reward)
-            self._record_metrics(observation)
+            self._finalize_episode(observation)
             return observation
 
-        run_results = self._run_all_tests(action.code)
-        self.last_results = run_results
-        metrics = self._score_results(run_results)
-        verifier_reward, verifier_metadata = self._try_verify(action.code)
-        if verifier_reward is not None:
-            metrics["reward"] = max(metrics["reward"], verifier_reward)
-            if verifier_metadata.get("feedback"):
-                metrics["feedback"] = str(verifier_metadata["feedback"])
-
+        reward, metadata = self._verify_submission(action.code)
+        self.last_results = list(metadata.get("results", []))
         observation = self._build_observation(
-            reward=metrics["reward"],
+            reward=reward,
             done=True,
-            feedback=metrics["feedback"],
-            pass_rate=metrics["pass_rate"],
-            visible_pass_rate=metrics["visible_pass_rate"],
-            hidden_pass_rate=metrics["hidden_pass_rate"],
+            feedback=str(metadata.get("feedback", "Evaluation complete.")),
+            pass_rate=float(metadata.get("pass_rate", 0.0)),
+            visible_pass_rate=0.0,
+            hidden_pass_rate=float(metadata.get("pass_rate", 0.0)),
             syntax_valid=True,
-            execution_status=metrics["execution_status"],
-            timeout_count=metrics["timeout_count"],
-            runtime_error_count=metrics["runtime_error_count"],
-            format_compliance=metrics["format_compliance"],
-            reward_components=metrics["reward_components"],
+            execution_status=str(metadata.get("execution_status", "completed")),
+            timeout_count=int(metadata.get("timeout_count", 0)),
+            runtime_error_count=int(metadata.get("runtime_error_count", 0)),
+            invalid_output_count=int(metadata.get("invalid_output_count", 0)),
+            wrong_answer_count=int(metadata.get("wrong_answer_count", 0)),
+            format_compliance=float(metadata.get("format_compliance", 0.0)),
+            reward_components={
+                key: round(float(value), 4)
+                for key, value in dict(metadata.get("reward_components", {})).items()
+            },
+            generator_reward_signal=float(metadata.get("generator_reward", 0.0)),
         )
-        self._update_history(observation.reward)
-        self._record_metrics(observation)
+        self._finalize_episode(observation)
         return observation
 
     @property
@@ -158,17 +169,20 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         execution_status: str = "not_run",
         timeout_count: int = 0,
         runtime_error_count: int = 0,
+        invalid_output_count: int = 0,
+        wrong_answer_count: int = 0,
         format_compliance: float = 0.0,
         reward_components: dict[str, float] | None = None,
+        generator_reward_signal: float = 0.0,
     ) -> AdaptObservation:
+        public_problem = self._public_problem_view()
         return AdaptObservation(
-            problem_id=self.problem["problem_id"],
-            difficulty=self._tier_to_difficulty(self.difficulty),
-            problem=self.problem["problem"],
-            input_format=self.problem["input_format"],
-            constraints=self.problem["constraints"],
-            examples=self.problem["examples"],
-            visible_tests=self.visible_tests,
+            problem_id=self.problem.get("problem_id", ""),
+            problem_type=self.problem.get("problem_type", ""),
+            difficulty=self.problem.get("difficulty_label", self._tier_to_difficulty(self.difficulty)),
+            problem=public_problem.get("problem", ""),
+            input_format=public_problem.get("input_format", ""),
+            constraints=public_problem.get("constraints", ""),
             feedback=feedback,
             pass_rate=pass_rate,
             visible_pass_rate=visible_pass_rate,
@@ -177,149 +191,119 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
             execution_status=execution_status,
             timeout_count=timeout_count,
             runtime_error_count=runtime_error_count,
+            invalid_output_count=invalid_output_count,
+            wrong_answer_count=wrong_answer_count,
             format_compliance=format_compliance,
             reward_components=reward_components or {},
+            generator_reward_signal=round(float(generator_reward_signal), 4),
             reward=round(max(0.0, min(1.0, reward)), 4),
             done=done,
         )
 
-    def _run_all_tests(self, code: str) -> list[dict[str, Any]]:
-        results = []
-        visible_count = len(self.visible_tests)
-        for index, test_case in enumerate(self.test_cases):
-            execution = run_code(code, test_case["input"])
-            actual = str(execution["stdout"]).strip()
-            expected = test_case["output"].strip()
-            results.append(
-                {
-                    "index": index,
-                    "split": "visible" if index < visible_count else "hidden",
-                    "input": test_case["input"] if index < visible_count else None,
-                    "expected": expected if index < visible_count else None,
-                    "actual": actual if index < visible_count else None,
-                    "stderr": str(execution["stderr"]).strip(),
-                    "exit_code": int(execution["exit_code"]),
-                    "timed_out": bool(execution.get("timed_out", False)),
-                    "passed": execution["exit_code"] == 0 and actual == expected,
-                    "format_ok": execution["exit_code"] == 0 and actual != "",
-                }
-            )
-        return results
-
-    def _score_results(self, run_results: list[dict[str, Any]]) -> dict[str, Any]:
-        total = len(run_results)
-        visible = [result for result in run_results if result["split"] == "visible"]
-        hidden = [result for result in run_results if result["split"] == "hidden"]
-        pass_rate = self._pass_rate(run_results)
-        visible_pass_rate = self._pass_rate(visible)
-        hidden_pass_rate = self._pass_rate(hidden)
-        timeout_count = sum(1 for result in run_results if result["timed_out"])
-        runtime_error_count = sum(
-            1
-            for result in run_results
-            if result["exit_code"] != 0 and not result["timed_out"]
+    def _load_problem(
+        self,
+        generated_problem: dict[str, Any] | None,
+        problem_id: str | None,
+    ) -> dict[str, Any]:
+        candidate = generated_problem or self.generator.generate(
+            self.difficulty,
+            self.history,
+            problem_id=problem_id,
         )
-        format_compliance = (
-            sum(1 for result in run_results if result["format_ok"]) / total
-            if total
-            else 0.0
+        if validate_problem(candidate):
+            return candidate
+        fallback = self.generator.generate(self.difficulty, self.history, problem_id=problem_id)
+        if not validate_problem(fallback):
+            raise ValueError("Generator produced an invalid problem twice in a row.")
+        return fallback
+
+    def _verify_submission(self, code: str) -> tuple[float, dict[str, Any]]:
+        try:
+            from verifier.verifier import verify
+        except ImportError as exc:
+            return 0.0, {"feedback": f"Verifier unavailable: {exc}", "execution_status": "verifier_error"}
+
+        try:
+            reward, metadata = verify(code, self.test_cases)
+        except Exception as exc:
+            return 0.0, {"feedback": f"Verifier crashed: {exc}", "execution_status": "verifier_error"}
+
+        metadata = dict(metadata or {})
+        diversity_bonus = self._diversity_bonus(self.problem.get("problem_type", ""))
+        validity_bonus = float(self.problem.get("validity_bonus", 0.0))
+        metadata["generator_reward"] = generator_reward(
+            float(metadata.get("pass_rate", 0.0)),
+            diversity_bonus=diversity_bonus,
+            validity_bonus=validity_bonus,
         )
-        timeout_rate = timeout_count / total if total else 0.0
-        runtime_error_rate = runtime_error_count / total if total else 0.0
-        reward_components = {
-            "correctness": 0.8 * pass_rate,
-            "syntax": 0.05,
-            "execution": 0.05 if runtime_error_count == 0 and timeout_count == 0 else 0.0,
-            "format": 0.1 * format_compliance,
-            "timeout_penalty": -0.2 * timeout_rate,
-            "runtime_penalty": -0.1 * runtime_error_rate,
-        }
-        reward = max(0.0, min(1.0, sum(reward_components.values())))
+        return float(reward), metadata
 
-        if timeout_count:
-            status = "timeout"
-        elif runtime_error_count:
-            status = "runtime_error"
-        else:
-            status = "completed"
+    def _finalize_episode(self, observation: AdaptObservation) -> None:
+        self._update_history(observation.pass_rate, observation.generator_reward_signal)
+        self._record_metrics(observation)
 
-        return {
-            "reward": round(reward, 4),
-            "feedback": self._build_feedback(run_results, pass_rate),
-            "pass_rate": round(pass_rate, 4),
-            "visible_pass_rate": round(visible_pass_rate, 4),
-            "hidden_pass_rate": round(hidden_pass_rate, 4),
-            "timeout_count": timeout_count,
-            "runtime_error_count": runtime_error_count,
-            "format_compliance": round(format_compliance, 4),
-            "execution_status": status,
-            "reward_components": {
-                key: round(value, 4) for key, value in reward_components.items()
-            },
-        }
+    def _update_history(self, pass_rate: float, generator_signal: float) -> None:
+        self.history["recent_pass_rates"].append(round(float(pass_rate), 4))
+        self.history["problem_types"].append(self.problem.get("problem_type", ""))
+        self.history["problem_signatures"].append(self.problem.get("problem_id", ""))
+        self.history["generator_rewards"].append(round(float(generator_signal), 4))
+        self.history["episode_index"] = int(self.history.get("episode_index", 0)) + 1
 
-    def _build_feedback(self, run_results: list[dict[str, Any]], pass_rate: float) -> str:
-        for result in run_results:
-            if result["timed_out"]:
-                label = self._safe_test_label(result)
-                return f"Timed out on {label}."
-
-            if result["exit_code"] != 0:
-                label = self._safe_test_label(result)
-                error = result["stderr"] or "runtime error"
-                return f"Runtime error on {label}: {error}"
-
-            if not result["passed"] and result["split"] == "visible":
-                return (
-                    f"Failed on visible input {str(result['input']).strip()}: "
-                    f"expected {result['expected']}, got {result['actual']}"
-                )
-
-            if not result["passed"]:
-                return f"Failed on hidden test {result['index'] + 1}."
-
-        return f"All tests passed. Pass rate: {pass_rate:.2f}"
-
-    def _get_success_rate(self) -> float:
-        if not self.history:
-            return 0.0
-        return sum(self.history) / len(self.history)
-
-    def _update_history(self, reward: float) -> None:
-        self.history.append(float(reward))
-        if len(self.history) > self.max_history:
-            self.history.pop(0)
+        for key in ("recent_pass_rates", "problem_types", "problem_signatures", "generator_rewards"):
+            values = self.history[key]
+            if len(values) > self.max_history:
+                del values[:-self.max_history]
 
     def _record_metrics(self, observation: AdaptObservation) -> None:
         self._state.last_reward = float(observation.reward or 0.0)
         self._state.last_pass_rate = observation.pass_rate
         self._state.last_feedback = observation.feedback
+        self._state.generator_reward_signal = observation.generator_reward_signal
+        self._state.history = {
+            "recent_pass_rates": list(self.history["recent_pass_rates"]),
+            "problem_types": list(self.history["problem_types"]),
+            "generator_rewards": list(self.history["generator_rewards"]),
+        }
         self._state.recent_metrics = {
             "difficulty_tier": self.difficulty,
-            "difficulty_label": self._tier_to_difficulty(self.difficulty),
-            "moving_success_rate": round(self._get_success_rate(), 4),
-            "history_size": len(self.history),
-            "visible_pass_rate": observation.visible_pass_rate,
-            "hidden_pass_rate": observation.hidden_pass_rate,
+            "difficulty_label": self.problem.get("difficulty_label", self._tier_to_difficulty(self.difficulty)),
+            "history_size": len(self.history["recent_pass_rates"]),
+            "pass_rate": observation.pass_rate,
             "execution_status": observation.execution_status,
             "timeout_count": observation.timeout_count,
             "runtime_error_count": observation.runtime_error_count,
+            "invalid_output_count": observation.invalid_output_count,
+            "wrong_answer_count": observation.wrong_answer_count,
             "format_compliance": observation.format_compliance,
             "reward_components": dict(observation.reward_components),
         }
 
-    def _try_verify(self, code: str) -> tuple[float | None, dict[str, Any]]:
-        try:
-            from verifier.verifier import verify
-        except ImportError:
-            return None, {}
+    def _recommend_next_difficulty(self) -> int:
+        recent = [float(value) for value in self.history["recent_pass_rates"][-5:]]
+        if not recent:
+            return self.difficulty
+        moving_average = sum(recent) / len(recent)
+        if moving_average > 0.75:
+            return min(self.max_difficulty, self.difficulty + 1)
+        if moving_average < 0.25:
+            return max(self.min_difficulty, self.difficulty - 1)
+        return self.difficulty
 
-        try:
-            reward, metadata = verify(code, self.test_cases)
-        except Exception as exc:
-            return None, {"feedback": f"Verifier unavailable: {exc}"}
+    def _public_problem_view(self) -> dict[str, str]:
+        visible = dict(self.problem.get("visible_problem", {}))
+        return {
+            "problem": visible.get("problem", self.problem.get("problem", "")),
+            "input_format": visible.get("input_format", self.problem.get("input_format", "")),
+            "constraints": visible.get("constraints", self.problem.get("constraints", "")),
+        }
 
-        return float(reward), metadata or {}
+    def _diversity_bonus(self, problem_type: str) -> float:
+        recent_types = list(self.history.get("problem_types", [])[-4:])
+        if not recent_types:
+            return 0.1
+        if problem_type in recent_types:
+            return 0.0
+        return 0.1
 
     def _check_syntax(self, code: str) -> tuple[bool, str]:
         try:
@@ -344,16 +328,6 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
 
         return True, ""
 
-    def _pass_rate(self, results: list[dict[str, Any]]) -> float:
-        if not results:
-            return 0.0
-        return sum(1 for result in results if result["passed"]) / len(results)
-
-    def _safe_test_label(self, result: dict[str, Any]) -> str:
-        if result["split"] == "visible":
-            return f"visible input {str(result['input']).strip()}"
-        return f"hidden test {result['index'] + 1}"
-
     def _tier_to_difficulty(self, tier: int) -> str:
         return DIFFICULTY_LABELS.get(tier, "easy")
 
@@ -361,13 +335,18 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         normalized = str(difficulty).strip().lower()
         if normalized.isdigit():
             try:
-                return max(
-                    self.min_difficulty,
-                    min(self.max_difficulty, int(normalized)),
-                )
+                return max(self.min_difficulty, min(self.max_difficulty, int(normalized)))
             except ValueError:
                 return self.difficulty
         for tier, label in DIFFICULTY_LABELS.items():
             if normalized == label:
                 return tier
-        return self.difficulty
+        try:
+            numeric = float(normalized)
+        except ValueError:
+            return self.difficulty
+        if numeric < 0.34:
+            return 1
+        if numeric < 0.67:
+            return 2
+        return 3
