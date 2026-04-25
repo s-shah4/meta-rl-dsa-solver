@@ -765,6 +765,10 @@ def run_training(
         lora_alpha=config.lora_alpha,
         lora_dropout=0.0,
     )
+    if not load_in_4bit:
+        model = model.to(model_dtype)
+        if hasattr(model, "config"):
+            model.config.torch_dtype = model_dtype
 
     curriculum = CurriculumManager()
     controller = GeneratorController(
