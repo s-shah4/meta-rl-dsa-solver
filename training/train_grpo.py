@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +19,18 @@ Write only runnable Python code.
 The program must read from stdin and print to stdout.
 If feedback is present, repair your previous solution instead of starting from scratch.
 Do not include markdown fences or explanations."""
+
+CRITICAL_PROJECTION_NAMES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+
+SMOKE_PREFERRED_PRECISION = "fp16"
 
 
 @dataclass
@@ -63,6 +76,7 @@ TRAINING_PRESETS: dict[str, dict[str, Any]] = {
         "baseline_eval": False,
         "disable_wandb": True,
         "disable_4bit": True,
+        "bf16": False,
         "output_dir": "outputs_smoke",
         "checkpoint_log_interval_steps": 2,
     },
@@ -707,6 +721,106 @@ def print_evaluation_summary(baseline: dict[str, Any], trained: dict[str, Any]) 
         print(f"{tier:<12} {baseline.get(tier, 0.0):>10.3f} {trained.get(tier, 0.0):>10.3f}")
 
 
+def get_runtime_versions() -> dict[str, str]:
+    versions: dict[str, str] = {}
+    try:
+        import accelerate
+
+        versions["accelerate"] = getattr(accelerate, "__version__", "unknown")
+    except ImportError:
+        versions["accelerate"] = "unavailable"
+    try:
+        import peft
+
+        versions["peft"] = getattr(peft, "__version__", "unknown")
+    except ImportError:
+        versions["peft"] = "unavailable"
+    try:
+        import torch
+
+        versions["torch"] = getattr(torch, "__version__", "unknown")
+        versions["cuda"] = str(getattr(torch.version, "cuda", None))
+    except ImportError:
+        versions["torch"] = "unavailable"
+        versions["cuda"] = "unavailable"
+    try:
+        import transformers
+
+        versions["transformers"] = getattr(transformers, "__version__", "unknown")
+    except ImportError:
+        versions["transformers"] = "unavailable"
+    try:
+        import trl
+
+        versions["trl"] = getattr(trl, "__version__", "unknown")
+    except ImportError:
+        versions["trl"] = "unavailable"
+    try:
+        import unsloth
+
+        versions["unsloth"] = getattr(unsloth, "__version__", "unknown")
+    except ImportError:
+        versions["unsloth"] = "unavailable"
+    return versions
+
+
+def validate_runtime_versions(version_info: dict[str, str]) -> None:
+    torch_version = version_info.get("torch", "")
+    match = re.match(r"^(\d+)\.(\d+)", torch_version)
+    if match is None:
+        return
+    major = int(match.group(1))
+    minor = int(match.group(2))
+    if (major, minor) < (2, 11):
+        raise RuntimeError(
+            f"Unsupported torch version for the current Unsloth GRPO path: {torch_version}. "
+            "Use torch>=2.11.0 to avoid the unsupported-extension configuration seen on the Space."
+        )
+
+
+def resolve_precision_policy(config: TrainingConfig, torch: Any) -> dict[str, Any]:
+    use_cuda = torch.cuda.is_available()
+    gpu_supports_bf16 = bool(use_cuda and torch.cuda.is_bf16_supported())
+    bf16_requested = bool(config.bf16)
+
+    if bf16_requested and not gpu_supports_bf16:
+        raise RuntimeError("bf16 was requested, but the active GPU/runtime does not report BF16 support.")
+
+    output_dir_str = str(config.output_dir)
+    is_smoke_run = "outputs_smoke" in output_dir_str
+
+    if bf16_requested:
+        precision_mode = "bf16"
+        model_dtype = torch.bfloat16
+    elif use_cuda:
+        precision_mode = SMOKE_PREFERRED_PRECISION if is_smoke_run else "fp16"
+        model_dtype = torch.float16
+    else:
+        precision_mode = "fp32"
+        model_dtype = torch.float32
+
+    use_bf16 = precision_mode == "bf16"
+    use_fp16 = precision_mode == "fp16"
+    load_in_4bit = not config.disable_4bit
+
+    if use_cuda and load_in_4bit and (use_bf16 or use_fp16):
+        raise RuntimeError(
+            "4-bit loading with mixed-precision GRPO is disabled for this training path. "
+            "Set disable_4bit=true or use a full-precision CPU run."
+        )
+
+    return {
+        "use_cuda": use_cuda,
+        "gpu_supports_bf16": gpu_supports_bf16,
+        "bf16_requested": bf16_requested,
+        "precision_mode": precision_mode,
+        "model_dtype": model_dtype,
+        "use_bf16": use_bf16,
+        "use_fp16": use_fp16,
+        "load_in_4bit": load_in_4bit,
+    }
+
+
 def normalize_model_precision(model: Any, target_dtype: Any) -> dict[str, Any]:
     floating_param_dtypes: dict[str, int] = {}
     floating_buffer_dtypes: dict[str, int] = {}
@@ -748,6 +862,43 @@ def normalize_model_precision(model: Any, target_dtype: Any) -> dict[str, Any]:
     }
 
 
+def audit_critical_module_precision(model: Any, target_dtype: Any) -> dict[str, Any]:
+    matching_params: list[dict[str, str]] = []
+    matching_buffers: list[dict[str, str]] = []
+    mismatched_items: list[dict[str, str]] = []
+
+    for name, param in model.named_parameters():
+        if not getattr(param, "is_floating_point", lambda: False)():
+            continue
+        if not any(fragment in name for fragment in CRITICAL_PROJECTION_NAMES):
+            continue
+        entry = {"name": name, "dtype": str(param.dtype)}
+        matching_params.append(entry)
+        if param.dtype != target_dtype:
+            mismatched_items.append(entry)
+
+    for name, buffer in model.named_buffers():
+        if not getattr(buffer, "is_floating_point", lambda: False)():
+            continue
+        if not any(fragment in name for fragment in CRITICAL_PROJECTION_NAMES):
+            continue
+        entry = {"name": name, "dtype": str(buffer.dtype)}
+        matching_buffers.append(entry)
+        if buffer.dtype != target_dtype:
+            mismatched_items.append(entry)
+
+    return {
+        "target_dtype": str(target_dtype),
+        "critical_projection_names": list(CRITICAL_PROJECTION_NAMES),
+        "critical_param_count": len(matching_params),
+        "critical_buffer_count": len(matching_buffers),
+        "critical_params": matching_params[:24],
+        "critical_buffers": matching_buffers[:24],
+        "mismatched_items": mismatched_items[:24],
+        "has_mismatch": bool(mismatched_items),
+    }
+
+
 def run_training(
     config: TrainingConfig | argparse.Namespace,
     *,
@@ -775,18 +926,15 @@ def run_training(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     PatchFastRL("GRPO", FastLanguageModel)
-
-    use_cuda = torch.cuda.is_available()
-    use_bf16 = bool(config.bf16)
-    model_dtype = torch.bfloat16 if use_bf16 else (torch.float16 if use_cuda else torch.float32)
-    load_in_4bit = not config.disable_4bit
-
-    # Unsloth's fast GRPO generation path has hit repeated dtype mismatches in the
-    # Space when combining 4-bit loading with FP16 training. Prefer stable FP16
-    # weights for this path so `/train` can complete reliably in the Space.
-    if use_cuda and not use_bf16 and load_in_4bit:
-        print("[training] disabling 4-bit loading for CUDA FP16 GRPO to avoid dtype mismatch")
-        load_in_4bit = False
+    version_info = get_runtime_versions()
+    validate_runtime_versions(version_info)
+    precision_policy = resolve_precision_policy(config, torch)
+    use_cuda = bool(precision_policy["use_cuda"])
+    use_bf16 = bool(precision_policy["use_bf16"])
+    use_fp16 = bool(precision_policy["use_fp16"])
+    model_dtype = precision_policy["model_dtype"]
+    load_in_4bit = bool(precision_policy["load_in_4bit"])
+    precision_mode = str(precision_policy["precision_mode"])
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=config.model_name,
@@ -812,6 +960,20 @@ def run_training(
             model.config.torch_dtype = model_dtype
         precision_audit = normalize_model_precision(model, model_dtype)
         print(f"[training] precision audit {json.dumps(precision_audit, sort_keys=True)}")
+    else:
+        precision_audit = {
+            "target_dtype": str(model_dtype),
+            "skipped": True,
+            "reason": "load_in_4bit=True",
+        }
+
+    critical_precision_audit = audit_critical_module_precision(model, model_dtype)
+    print(f"[training] critical precision audit {json.dumps(critical_precision_audit, sort_keys=True)}")
+    if critical_precision_audit["has_mismatch"]:
+        raise RuntimeError(
+            "Critical projection modules remain in the wrong dtype before GRPOTrainer initialization. "
+            f"Audit: {json.dumps(critical_precision_audit, sort_keys=True)}"
+        )
 
     curriculum = CurriculumManager()
     controller = GeneratorController(
@@ -841,11 +1003,29 @@ def run_training(
             payload.update(artifact_paths)
             progress_callback(payload)
 
+    emit_progress(
+        {
+            "phase": "train_setup",
+            "status": "running",
+            "completed_steps": 0,
+            "total_steps": int(config.max_steps),
+            "current_epoch": 0.0,
+            "precision_mode": precision_mode,
+            "runtime_versions": version_info,
+            "precision_policy": {
+                key: (str(value) if key == "model_dtype" else value)
+                for key, value in precision_policy.items()
+            },
+            "precision_audit": precision_audit,
+            "critical_precision_audit": critical_precision_audit,
+        }
+    )
+
     baseline_summary = {"easy": 0.0, "medium": 0.0, "hard": 0.0, "overall": 0.0}
     trained_summary = {"easy": 0.0, "medium": 0.0, "hard": 0.0, "overall": 0.0}
 
     if config.baseline_eval:
-        FastLanguageModel.for_inference(model)
+        model.eval()
         emit_progress(
             {
                 "phase": "baseline_eval",
@@ -884,7 +1064,7 @@ def run_training(
         max_steps=config.max_steps,
         logging_steps=1,
         bf16=use_bf16,
-        fp16=use_cuda and not use_bf16,
+        fp16=use_fp16,
         report_to=[],
     )
 
@@ -938,7 +1118,7 @@ def run_training(
     tokenizer.save_pretrained(str(output_dir))
 
     if config.baseline_eval:
-        FastLanguageModel.for_inference(model)
+        model.eval()
         emit_progress(
             {
                 "phase": "trained_eval",
@@ -981,6 +1161,14 @@ def run_training(
 
     return {
         "config": config.to_dict(),
+        "runtime_versions": version_info,
+        "precision_mode": precision_mode,
+        "precision_policy": {
+            key: (str(value) if key == "model_dtype" else value)
+            for key, value in precision_policy.items()
+        },
+        "precision_audit": precision_audit,
+        "critical_precision_audit": critical_precision_audit,
         "output_dir": str(output_dir.resolve()),
         "reward_curve_csv": str(csv_path.resolve()),
         **trace_artifact_paths,

@@ -84,6 +84,11 @@ class TrainingJobState:
     current_epoch: float = 0.0
     epochs_remaining: float | None = None
     progress_ratio: float = 0.0
+    precision_mode: str | None = None
+    runtime_versions: dict[str, Any] = field(default_factory=dict)
+    precision_policy: dict[str, Any] = field(default_factory=dict)
+    precision_audit: dict[str, Any] = field(default_factory=dict)
+    critical_precision_audit: dict[str, Any] = field(default_factory=dict)
     train_episode_index: int = 0
     current_difficulty: str | None = None
     curriculum_level: int | None = None
@@ -471,6 +476,11 @@ class SpaceTrainingManager:
                 current_epoch=float(payload.get("current_epoch", 0.0) or 0.0),
                 epochs_remaining=payload.get("epochs_remaining"),
                 progress_ratio=float(payload.get("progress_ratio", 0.0) or 0.0),
+                precision_mode=payload.get("precision_mode"),
+                runtime_versions=payload.get("runtime_versions", {}),
+                precision_policy=payload.get("precision_policy", {}),
+                precision_audit=payload.get("precision_audit", {}),
+                critical_precision_audit=payload.get("critical_precision_audit", {}),
                 train_episode_index=int(payload.get("train_episode_index", 0) or 0),
                 current_difficulty=payload.get("current_difficulty"),
                 curriculum_level=payload.get("curriculum_level"),
@@ -567,6 +577,11 @@ class SpaceTrainingManager:
                 current_epoch=0.0,
                 epochs_remaining=float(config.max_steps),
                 progress_ratio=0.0,
+                precision_mode=None,
+                runtime_versions={},
+                precision_policy={},
+                precision_audit={},
+                critical_precision_audit={},
                 error=None,
                 traceback=None,
             )
@@ -640,6 +655,11 @@ class SpaceTrainingManager:
                 self._job.total_steps = int(config.max_steps)
                 self._job.remaining_steps = 0
                 self._job.progress_ratio = 1.0 if self._job.total_steps else 0.0
+                self._job.precision_mode = summary.get("precision_mode")
+                self._job.runtime_versions = summary.get("runtime_versions", {})
+                self._job.precision_policy = summary.get("precision_policy", {})
+                self._job.precision_audit = summary.get("precision_audit", {})
+                self._job.critical_precision_audit = summary.get("critical_precision_audit", {})
                 self._job.current_epoch = float(summary.get("completed_steps", config.max_steps))
                 self._job.epochs_remaining = 0.0
                 self._job.baseline_summary = summary.get("baseline_summary", {})

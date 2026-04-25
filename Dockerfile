@@ -8,7 +8,8 @@ RUN apt-get update \
 
 COPY . .
 
-RUN pip install --no-cache-dir -e ".[train]"
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -e ".[train]"
 
 ENV CC=gcc
 ENV CXX=g++
