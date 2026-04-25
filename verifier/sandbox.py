@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 
 
@@ -11,7 +12,7 @@ def run_code(code: str, stdin: str, timeout: int = 2):
             path = f.name
 
         result = subprocess.run(
-            ["python3", path],
+            [sys.executable, path],
             input=stdin,
             text=True,
             capture_output=True,

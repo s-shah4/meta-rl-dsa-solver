@@ -14,7 +14,7 @@ tags:
 
 ADAPT, the Adversarial DSA Tutor, is an OpenEnv-compliant RLVR environment for training code-generation agents on small DSA tasks. The agent receives a problem prompt, examples, and visible tests, then submits Python code. The environment runs the code against visible and hidden tests and returns reward, pass-rate metrics, execution status, and feedback.
 
-This repo now focuses on the environment layer only. Verifier work and training scripts are owned separately.
+This repo includes the environment, verifier helpers, a baseline inference runner, and a GRPO training entrypoint so the full submission flow can be exercised from one codebase.
 
 ## Why This Environment
 
@@ -120,11 +120,15 @@ uvicorn server.app:app --host 0.0.0.0 --port 7860
 
 Useful endpoints:
 
+- `GET /`
 - `GET /health`
+- `GET /metadata`
+- `GET /tasks`
 - `GET /schema`
 - `POST /reset`
 - `POST /step`
 - `GET /state`
+- `POST /mcp`
 
 Example step request:
 
@@ -132,10 +136,43 @@ Example step request:
 curl -X POST http://localhost:7860/step -H "Content-Type: application/json" -d "{\"action\":{\"code\":\"n=int(input())\nprint(n*2)\"}}"
 ```
 
+You can also send the raw action body:
+
+```powershell
+curl -X POST http://localhost:7860/step -H "Content-Type: application/json" -d "{\"code\":\"n=int(input())\nprint(n*2)\"}"
+```
+
 Validate with OpenEnv once dependencies are installed:
 
 ```powershell
 openenv validate .
+```
+
+Run the verifier smoke test:
+
+```powershell
+python scripts\test_verifier.py
+```
+
+Run the environment smoke test:
+
+```powershell
+python scripts\test_env.py
+```
+
+Run the baseline model loop:
+
+```powershell
+$env:HF_TOKEN="..."
+$env:API_BASE_URL="https://router.huggingface.co/v1"
+$env:MODEL_NAME="openai/gpt-oss-120b"
+python inference.py
+```
+
+Run GRPO training:
+
+```powershell
+python training\train_grpo.py --output-dir outputs_v2 --bf16
 ```
 
 ## Hugging Face Spaces

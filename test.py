@@ -12,7 +12,7 @@ def assert_hidden_tests_are_not_exposed(payload: dict) -> None:
 
 def main() -> None:
     env = AdaptEnvironment()
-    observation = env.reset()
+    observation = env.reset(problem_id="easy_double")
     assert isinstance(observation, AdaptObservation)
     assert observation.visible_tests
     assert observation.problem_id == "easy_double"

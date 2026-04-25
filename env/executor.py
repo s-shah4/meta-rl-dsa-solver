@@ -23,7 +23,7 @@ def run_code(code: str, input_data: str) -> dict:
 
         try:
             result = subprocess.run(
-                ["python3", str(file_path)],
+                [sys.executable, str(file_path)],
                 input=input_data,
                 text=True,
                 capture_output=True,

@@ -1,167 +1,152 @@
-import torch
-<<<<<<< HEAD
-from unsloth import FastLanguageModel, PatchFastRL
-from trl import GRPOTrainer, GRPOConfig
-from meta_rl_dsa_solver_env import DsaEnv
+from __future__ import annotations
 
-# 1. Patch Unsloth for RL speedups
-PatchFastRL("GRPO", FastLanguageModel)
+import argparse
+from dataclasses import dataclass, field
+from typing import Any
 
-# 2. Load Model & Tokenizer
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "unsloth/Llama-3.2-3B-Instruct", # Use appropriate 2026 base
-    max_seq_length = 2048,
-    load_in_4bit = True,
-    fast_inference = True,
-=======
-import numpy as np
-from unsloth import FastLanguageModel, PatchFastRL
-from trl import GRPOTrainer, GRPOConfig
-from meta_rl_dsa_solver_env.env.adapt_env import AdaptEnvironment
-from meta_rl_dsa_solver_env.models import AdaptAction
+from env.adapt_env import AdaptEnvironment
+from models import AdaptAction
 
-# 1. Initialize Model & Speedups
-PatchFastRL("GRPO", FastLanguageModel)
 
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "unsloth/Llama-3.2-3B-Instruct",
-    max_seq_length = 2048,
-    load_in_4bit = True,
->>>>>>> environment-v2
-)
+def extract_code(completion: str) -> str:
+    text = completion.strip()
+    if "```python" in text:
+        return text.split("```python", 1)[1].split("```", 1)[0].strip()
+    if "```" in text:
+        return text.split("```", 1)[1].split("```", 1)[0].strip()
+    return text
 
-model = FastLanguageModel.get_peft_model(
-    model,
-    r = 16,
-    target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"],
-    lora_alpha = 16,
-<<<<<<< HEAD
-    lora_dropout = 0,
-)
 
-# 3. Define the Reward Function (Interface for Person 2)
-def reward_function(prompts, completions, **kwargs) -> list[float]:
-    """
-    In GRPO, the reward function is called on the batch of completions.
-    For V0, we manually trigger the Env's step logic.
-    """
-    env = DsaEnv()
-    rewards = []
-    
-    for completion in completions:
-        # Extract code from completion (assuming markdown tags)
-        code = completion.split("```python")[-1].split("```")[0].strip() if "```" in completion else completion
-        _, reward, _, _, _ = env.step(code)
-        rewards.append(reward)
-    
-    return rewards
-
-# 4. Training Configuration
-training_args = GRPOConfig(
-    output_dir = "./outputs",
-    learning_rate = 5e-6,
-    per_device_train_batch_size = 4,
-    gradient_accumulation_steps = 4,
-    max_prompt_length = 512,
-    max_completion_length = 512,
-    num_generations = 8, # Group size for GRPO
-    logging_steps = 1,
-    max_steps = 100, # Quick run for MVP
-)
-
-# 5. Initialize Trainer
-trainer = GRPOTrainer(
-    model = model,
-    reward_funcs = [reward_function],
-    args = training_args,
-    train_dataset = [
-        {"prompt": "Write a function `sum_list(arr: list) -> int` that returns the sum of a list."}
-    ] * 100, # Dummy dataset for V0 validation
-)
-
-if __name__ == "__main__":
-    print("Starting V0 Training...")
-    trainer.train()
-    model.save_pretrained_merged("final_v0_model", tokenizer, save_method = "merged_16bit")
-=======
-)
-
-# 2. V2 Heuristic State Machine
+@dataclass
 class CurriculumManager:
-    def __init__(self):
-        self.difficulties = ["easy", "medium", "hard"]
-        self.current_idx = 0
-        self.success_history = []
-        self.window_size = 10  # Moving average window
+    difficulties: list[str] = field(default_factory=lambda: ["easy", "medium", "hard"])
+    current_idx: int = 0
+    success_history: list[float] = field(default_factory=list)
+    window_size: int = 10
 
-    def get_current_difficulty(self):
+    def current_difficulty(self) -> str:
         return self.difficulties[self.current_idx]
 
-    def update(self, success_rate):
-        self.success_history.append(success_rate)
+    def update(self, batch_success_rate: float) -> None:
+        self.success_history.append(float(batch_success_rate))
         if len(self.success_history) > self.window_size:
             self.success_history.pop(0)
-        
-        # V2 Logic: If moving average > 70%, increase difficulty
-        avg_success = np.mean(self.success_history)
-        if avg_success > 0.70 and self.current_idx < len(self.difficulties) - 1:
+
+        moving_average = sum(self.success_history) / len(self.success_history)
+        if moving_average > 0.70 and self.current_idx < len(self.difficulties) - 1:
             self.current_idx += 1
-            print(f"--- HEURISTIC LEVEL UP: Moving to {self.difficulties[self.current_idx]} ---")
-            self.success_history = [] # Reset for the new tier
+            self.success_history.clear()
+            print(
+                f"[curriculum] promoted to {self.current_difficulty()} "
+                f"(moving_success={moving_average:.2f})"
+            )
 
-curriculum = CurriculumManager()
 
-# 3. V2 Reward Function with Curriculum Feedback
-def v2_reward_func(prompts, completions, **kwargs) -> list[float]:
-    env = AdaptEnvironment()
-    rewards = []
-    successes = []
-    
-    current_diff = curriculum.get_current_difficulty()
-    
-    for completion in completions:
-        # Load problem based on current heuristic difficulty
-        env.reset(difficulty=current_diff)
-        
-        code = completion.split("```python")[-1].split("```")[0].strip() if "```" in completion else completion
-        action = AdaptAction(code=code)
-        obs = env.step(action)
-        
-        rewards.append(float(obs.reward))
-        successes.append(1.0 if obs.pass_rate == 1.0 else 0.0)
-    
-    # Update the curriculum manager based on this batch
-    batch_success_rate = np.mean(successes)
-    curriculum.update(batch_success_rate)
-    
-    return rewards
+def build_reward_func(curriculum: CurriculumManager):
+    def reward_func(prompts, completions, **kwargs) -> list[float]:
+        del prompts, kwargs
+        env = AdaptEnvironment()
+        rewards: list[float] = []
+        successes: list[float] = []
+        difficulty = curriculum.current_difficulty()
 
-# 4. Dataset: Transition from single prompt to generic instruction
-# This forces the LLM to look at the 'problem statement' in the observation
-dataset = [
-    {"prompt": "Read the problem statement and constraints carefully. Write a Python solution that reads from stdin and prints to stdout."}
-] * 200 # Larger dataset for multi-tier learning
+        for completion in completions:
+            env.reset(difficulty=difficulty)
+            observation = env.step(AdaptAction(code=extract_code(completion)))
+            rewards.append(float(observation.reward))
+            successes.append(1.0 if observation.pass_rate == 1.0 else 0.0)
 
-# 5. Config
-training_args = GRPOConfig(
-    output_dir = "./outputs_v2",
-    learning_rate = 5e-6,
-    per_device_train_batch_size = 1,
-    gradient_accumulation_steps = 8, # Higher for stability during transitions
-    num_generations = 8,
-    max_steps = 250,
-    bf16 = True,
-    logging_steps = 1,
-)
+        if successes:
+            curriculum.update(sum(successes) / len(successes))
 
-trainer = GRPOTrainer(
-    model = model,
-    reward_funcs = [v2_reward_func],
-    args = training_args,
-    train_dataset = dataset,
-)
+        return rewards
+
+    return reward_func
+
+
+def build_dataset(size: int) -> list[dict[str, str]]:
+    prompt = (
+        "Read the problem statement carefully. "
+        "Write a Python solution that reads from stdin and prints to stdout."
+    )
+    return [{"prompt": prompt}] * size
+
+
+def run_training(args: argparse.Namespace) -> None:
+    try:
+        from trl import GRPOConfig, GRPOTrainer
+        from unsloth import FastLanguageModel, PatchFastRL
+    except ImportError as exc:
+        raise RuntimeError(
+            "Training dependencies are missing. Install `trl` and `unsloth` before running GRPO training."
+        ) from exc
+
+    PatchFastRL("GRPO", FastLanguageModel)
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=args.model_name,
+        max_seq_length=args.max_seq_length,
+        load_in_4bit=not args.disable_4bit,
+    )
+
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=args.lora_rank,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        lora_alpha=args.lora_alpha,
+        lora_dropout=0.0,
+    )
+
+    curriculum = CurriculumManager()
+    training_args = GRPOConfig(
+        output_dir=args.output_dir,
+        learning_rate=args.learning_rate,
+        per_device_train_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        num_generations=args.num_generations,
+        max_prompt_length=args.max_prompt_length,
+        max_completion_length=args.max_completion_length,
+        max_steps=args.max_steps,
+        logging_steps=1,
+        bf16=args.bf16,
+    )
+
+    trainer = GRPOTrainer(
+        model=model,
+        reward_funcs=[build_reward_func(curriculum)],
+        args=training_args,
+        train_dataset=build_dataset(args.dataset_size),
+    )
+    trainer.train()
+    model.save_pretrained(args.output_dir)
+    tokenizer.save_pretrained(args.output_dir)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="GRPO training entrypoint for the ADAPT DSA environment.")
+    parser.add_argument("--model-name", default="unsloth/Llama-3.2-3B-Instruct")
+    parser.add_argument("--output-dir", default="outputs_v2")
+    parser.add_argument("--dataset-size", type=int, default=200)
+    parser.add_argument("--max-steps", type=int, default=250)
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    parser.add_argument("--num-generations", type=int, default=8)
+    parser.add_argument("--max-seq-length", type=int, default=2048)
+    parser.add_argument("--max-prompt-length", type=int, default=512)
+    parser.add_argument("--max-completion-length", type=int, default=512)
+    parser.add_argument("--learning-rate", type=float, default=5e-6)
+    parser.add_argument("--lora-rank", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=16)
+    parser.add_argument("--disable-4bit", action="store_true")
+    parser.add_argument("--bf16", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    run_training(args)
+
 
 if __name__ == "__main__":
-    print(f"Starting V2 Training. Initial Difficulty: {curriculum.get_current_difficulty()}")
-    trainer.train()
->>>>>>> environment-v2
+    main()

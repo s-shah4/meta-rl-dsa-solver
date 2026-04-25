@@ -21,7 +21,7 @@ class AdaptEnvClient:
         return response.json()
 
     def step(self, code: str) -> dict[str, Any]:
-        response = self._client.post("/step", json={"action": AdaptAction(code=code).model_dump()})
+        response = self._client.post("/step", json=AdaptAction(code=code).model_dump())
         response.raise_for_status()
         return response.json()
 

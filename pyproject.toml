@@ -26,5 +26,5 @@ server = "server.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["env", "server"]
+packages = ["env", "server", "verifier"]
 py-modules = ["app", "client", "models"]

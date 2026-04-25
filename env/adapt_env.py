@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import ast
-from typing import Any
+from typing import Any, Generic, TypeVar
 from uuid import uuid4
-
-from openenv.core.env_server.interfaces import Environment
 
 from env.executor import run_code
 from env.test_cases import get_test_cases, load_problem, split_test_cases
 from models import AdaptAction, AdaptObservation, AdaptState
+
+try:
+    from openenv.core.env_server.interfaces import Environment
+except ImportError:
+    ActionT = TypeVar("ActionT")
+    ObservationT = TypeVar("ObservationT")
+    StateT = TypeVar("StateT")
+
+    class Environment(Generic[ActionT, ObservationT, StateT]):
+        SUPPORTS_CONCURRENT_SESSIONS = False
+
+        def __init__(self) -> None:
+            pass
 
 
 FORBIDDEN_IMPORTS = {"os", "pathlib", "shutil", "socket", "subprocess"}
