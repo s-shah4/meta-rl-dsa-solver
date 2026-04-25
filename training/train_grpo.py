@@ -62,6 +62,7 @@ TRAINING_PRESETS: dict[str, dict[str, Any]] = {
         "evaluation_episodes": 3,
         "baseline_eval": False,
         "disable_wandb": True,
+        "disable_4bit": True,
         "output_dir": "outputs_smoke",
         "checkpoint_log_interval_steps": 2,
     },
@@ -737,12 +738,20 @@ def run_training(
     use_cuda = torch.cuda.is_available()
     use_bf16 = bool(config.bf16)
     model_dtype = torch.bfloat16 if use_bf16 else (torch.float16 if use_cuda else torch.float32)
+    load_in_4bit = not config.disable_4bit
+
+    # Unsloth's fast GRPO generation path has hit repeated dtype mismatches in the
+    # Space when combining 4-bit loading with FP16 training. Prefer stable FP16
+    # weights for this path so `/train` can complete reliably in the Space.
+    if use_cuda and not use_bf16 and load_in_4bit:
+        print("[training] disabling 4-bit loading for CUDA FP16 GRPO to avoid dtype mismatch")
+        load_in_4bit = False
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=config.model_name,
         max_seq_length=config.max_seq_length,
         dtype=model_dtype,
-        load_in_4bit=not config.disable_4bit,
+        load_in_4bit=load_in_4bit,
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
