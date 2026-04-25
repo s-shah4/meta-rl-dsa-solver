@@ -176,7 +176,7 @@ Recommended artifacts to include here:
 
 ```powershell
 cd C:\Users\kaust\PycharmProjects\meta-rl-dsa-solver
-python -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\pip install -e .
 ```
 
@@ -185,6 +185,12 @@ For training and plotting, also install your training extras:
 ```powershell
 .\.venv\Scripts\pip install trl unsloth matplotlib wandb
 ```
+
+Recommended training target:
+
+- Python `3.11`
+- Base model `Qwen/Qwen2.5-3B-Instruct`
+- Single NVIDIA L4 with 4-bit LoRA + Unsloth GRPO
 
 ### 2. Start the OpenEnv server
 
@@ -222,13 +228,13 @@ curl "http://localhost:7860/state?session_id=<SESSION_ID>"
 python training\train_grpo.py ^
   --generator-mode reward_aware ^
   --baseline-eval ^
-  --output-dir outputs_v3
+  --output-dir outputs_l4
 ```
 
 ### 7. Plot the training curves
 
 ```powershell
-python training\plot_results.py outputs_v3\reward_curve.csv
+python training\plot_results.py outputs_l4\reward_curve.csv
 ```
 
 ## Hugging Face Space

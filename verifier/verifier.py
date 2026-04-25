@@ -4,13 +4,36 @@ from typing import Any
 
 from verifier.complexity import analyze_code_complexity
 from verifier.metrics import compute_pass_rate
-from verifier.sandbox import run_code
+from verifier.sandbox import run_code, validate_code
 
 
-def verify(code: str, test_cases: list[dict[str, Any]] | list[tuple[str, str]]) -> tuple[float, dict[str, Any]]:
-    results: list[dict[str, Any]] = []
+def verify(
+    code: str,
+    test_cases: list[dict[str, Any]] | list[tuple[str, str]],
+    *,
+    step_number: int = 1,
+) -> tuple[float, dict[str, Any]]:
+    precheck = validate_code(code)
     complexity = analyze_code_complexity(code)
 
+    if not precheck["syntax_ok"] or not precheck["safety_ok"]:
+        reward, metrics = compute_pass_rate(
+            [],
+            step_number=step_number,
+            syntax_ok=bool(precheck["syntax_ok"]),
+            safety_ok=bool(precheck["safety_ok"]),
+            precheck_status=str(precheck["execution_status"]),
+        )
+        feedback = _build_feedback(metrics, error=str(precheck["error"]))
+        return reward, {
+            **metrics,
+            **complexity,
+            "feedback": feedback,
+            "results": [],
+            "error": str(precheck["error"]),
+        }
+
+    results: list[dict[str, Any]] = []
     for index, test_case in enumerate(test_cases):
         if isinstance(test_case, dict):
             stdin = str(test_case.get("input", ""))
@@ -51,13 +74,15 @@ def verify(code: str, test_cases: list[dict[str, Any]] | list[tuple[str, str]]) 
                 "input": stdin if is_visible else "",
                 "timed_out": timed_out,
                 "exit_code": exit_code,
+                "duration_ms": execution.get("duration_ms", 0.0),
+                "sandboxed": bool(execution.get("sandboxed", False)),
+                "sandbox_mode": execution.get("sandbox_mode", "portable"),
                 "visibility": "visible" if is_visible else "hidden",
             }
         )
 
-    reward, metrics = compute_pass_rate(results)
+    reward, metrics = compute_pass_rate(results, step_number=step_number)
     feedback = _build_feedback(metrics)
-
     return reward, {
         **metrics,
         **complexity,
@@ -66,13 +91,18 @@ def verify(code: str, test_cases: list[dict[str, Any]] | list[tuple[str, str]]) 
     }
 
 
-def _build_feedback(metrics: dict[str, Any]) -> str:
-    if metrics["execution_status"] == "timeout":
+def _build_feedback(metrics: dict[str, Any], *, error: str = "") -> str:
+    execution_status = str(metrics.get("execution_status", "unknown"))
+    if execution_status == "syntax_error":
+        return f"Submission has a syntax error. {error}".strip()
+    if execution_status == "safety_violation":
+        return f"Submission violated the sandbox policy. {error}".strip()
+    if execution_status == "timeout":
         return "Submission timed out on one or more hidden evaluation tests."
-    if metrics["execution_status"] == "runtime_error":
+    if execution_status == "runtime_error":
         return "Submission raised a runtime error on one or more hidden evaluation tests."
-    if metrics["execution_status"] == "invalid_output_format":
+    if execution_status == "invalid_output_format":
         return "Submission completed but produced invalid output format on one or more tests."
-    if metrics["execution_status"] == "wrong_answer":
+    if execution_status == "wrong_answer":
         return "Submission ran successfully but returned an incorrect answer on one or more hidden tests."
     return f"All hidden tests passed. Pass rate: {metrics['pass_rate']:.2f}"

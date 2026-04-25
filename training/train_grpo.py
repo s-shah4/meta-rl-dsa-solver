@@ -35,20 +35,21 @@ SMOKE_PREFERRED_PRECISION = "fp16"
 
 @dataclass
 class TrainingConfig:
-    model_name: str = "unsloth/Llama-3.2-3B-Instruct"
-    output_dir: str = "outputs_v3"
+    model_name: str = "Qwen/Qwen2.5-3B-Instruct"
+    output_dir: str = "outputs_l4"
     dataset_size: int = 200
     max_steps: int = 250
     batch_size: int = 1
     gradient_accumulation_steps: int = 8
-    num_generations: int = 8
+    num_generations: int = 4
     max_seq_length: int = 2048
     max_prompt_length: int = 1024
     max_completion_length: int = 512
     learning_rate: float = 5e-6
     lora_rank: int = 16
     lora_alpha: int = 16
-    disable_4bit: bool = False
+    load_in_4bit: bool = True
+    gradient_checkpointing: bool = True
     bf16: bool = False
     baseline_eval: bool = False
     evaluation_episodes: int = 20
@@ -60,6 +61,7 @@ class TrainingConfig:
     non_deterministic_generator: bool = False
     trace_logging_enabled: bool = True
     checkpoint_log_interval_steps: int = 10
+    save_merged_model: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -67,6 +69,7 @@ class TrainingConfig:
 
 TRAINING_PRESETS: dict[str, dict[str, Any]] = {
     "smoke": {
+        "model_name": "Qwen/Qwen2.5-3B-Instruct",
         "dataset_size": 12,
         "max_steps": 6,
         "batch_size": 1,
@@ -75,12 +78,40 @@ TRAINING_PRESETS: dict[str, dict[str, Any]] = {
         "evaluation_episodes": 3,
         "baseline_eval": False,
         "disable_wandb": True,
-        "disable_4bit": True,
+        "load_in_4bit": False,
+        "gradient_checkpointing": False,
         "bf16": False,
         "output_dir": "outputs_smoke",
         "checkpoint_log_interval_steps": 2,
     },
-    "default": {},
+    "l4": {
+        "model_name": "Qwen/Qwen2.5-3B-Instruct",
+        "output_dir": "outputs_l4",
+        "batch_size": 1,
+        "gradient_accumulation_steps": 8,
+        "num_generations": 4,
+        "max_seq_length": 2048,
+        "max_prompt_length": 1024,
+        "max_completion_length": 512,
+        "lora_rank": 16,
+        "lora_alpha": 16,
+        "load_in_4bit": True,
+        "gradient_checkpointing": True,
+    },
+    "default": {
+        "model_name": "Qwen/Qwen2.5-3B-Instruct",
+        "output_dir": "outputs_l4",
+        "batch_size": 1,
+        "gradient_accumulation_steps": 8,
+        "num_generations": 4,
+        "max_seq_length": 2048,
+        "max_prompt_length": 1024,
+        "max_completion_length": 512,
+        "lora_rank": 16,
+        "lora_alpha": 16,
+        "load_in_4bit": True,
+        "gradient_checkpointing": True,
+    },
 }
 
 
@@ -165,7 +196,8 @@ def namespace_to_config(args: argparse.Namespace) -> TrainingConfig:
         learning_rate=args.learning_rate,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
-        disable_4bit=args.disable_4bit,
+        load_in_4bit=not args.disable_4bit,
+        gradient_checkpointing=not getattr(args, "disable_gradient_checkpointing", False),
         bf16=args.bf16,
         baseline_eval=args.baseline_eval,
         evaluation_episodes=args.evaluation_episodes,
@@ -177,6 +209,7 @@ def namespace_to_config(args: argparse.Namespace) -> TrainingConfig:
         non_deterministic_generator=args.non_deterministic_generator,
         trace_logging_enabled=args.trace_logging_enabled,
         checkpoint_log_interval_steps=args.checkpoint_log_interval_steps,
+        save_merged_model=getattr(args, "save_merged_model", False),
     )
 
 
@@ -786,14 +819,11 @@ def resolve_precision_policy(config: TrainingConfig, torch: Any) -> dict[str, An
     if bf16_requested and not gpu_supports_bf16:
         raise RuntimeError("bf16 was requested, but the active GPU/runtime does not report BF16 support.")
 
-    output_dir_str = str(config.output_dir)
-    is_smoke_run = "outputs_smoke" in output_dir_str
-
-    if bf16_requested:
+    if bf16_requested or (use_cuda and gpu_supports_bf16):
         precision_mode = "bf16"
         model_dtype = torch.bfloat16
     elif use_cuda:
-        precision_mode = SMOKE_PREFERRED_PRECISION if is_smoke_run else "fp16"
+        precision_mode = SMOKE_PREFERRED_PRECISION
         model_dtype = torch.float16
     else:
         precision_mode = "fp32"
@@ -801,13 +831,7 @@ def resolve_precision_policy(config: TrainingConfig, torch: Any) -> dict[str, An
 
     use_bf16 = precision_mode == "bf16"
     use_fp16 = precision_mode == "fp16"
-    load_in_4bit = not config.disable_4bit
-
-    if use_cuda and load_in_4bit and (use_bf16 or use_fp16):
-        raise RuntimeError(
-            "4-bit loading with mixed-precision GRPO is disabled for this training path. "
-            "Set disable_4bit=true or use a full-precision CPU run."
-        )
+    load_in_4bit = bool(config.load_in_4bit)
 
     return {
         "use_cuda": use_cuda,
@@ -953,6 +977,7 @@ def run_training(
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         lora_alpha=config.lora_alpha,
         lora_dropout=0.0,
+        use_gradient_checkpointing="unsloth" if config.gradient_checkpointing else False,
     )
     if not load_in_4bit:
         model = model.to(model_dtype)
@@ -967,9 +992,16 @@ def run_training(
             "reason": "load_in_4bit=True",
         }
 
-    critical_precision_audit = audit_critical_module_precision(model, model_dtype)
+    if load_in_4bit:
+        critical_precision_audit = {
+            "target_dtype": str(model_dtype),
+            "skipped": True,
+            "reason": "load_in_4bit=True",
+        }
+    else:
+        critical_precision_audit = audit_critical_module_precision(model, model_dtype)
     print(f"[training] critical precision audit {json.dumps(critical_precision_audit, sort_keys=True)}")
-    if critical_precision_audit["has_mismatch"]:
+    if not load_in_4bit and critical_precision_audit["has_mismatch"]:
         raise RuntimeError(
             "Critical projection modules remain in the wrong dtype before GRPOTrainer initialization. "
             f"Audit: {json.dumps(critical_precision_audit, sort_keys=True)}"
@@ -1114,7 +1146,10 @@ def run_training(
     )
     trainer.train()
 
-    model.save_pretrained(str(output_dir))
+    if config.save_merged_model and hasattr(model, "save_pretrained_merged"):
+        model.save_pretrained_merged(str(output_dir), tokenizer, save_method="merged_16bit")
+    else:
+        model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
 
     if config.baseline_eval:
@@ -1180,13 +1215,13 @@ def run_training(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GRPO training entrypoint for the ADAPT DSA environment.")
-    parser.add_argument("--model-name", default="unsloth/Llama-3.2-3B-Instruct")
-    parser.add_argument("--output-dir", default="outputs_v3")
+    parser.add_argument("--model-name", default="Qwen/Qwen2.5-3B-Instruct")
+    parser.add_argument("--output-dir", default="outputs_l4")
     parser.add_argument("--dataset-size", type=int, default=200)
     parser.add_argument("--max-steps", type=int, default=250)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
-    parser.add_argument("--num-generations", type=int, default=8)
+    parser.add_argument("--num-generations", type=int, default=4)
     parser.add_argument("--max-seq-length", type=int, default=2048)
     parser.add_argument("--max-prompt-length", type=int, default=1024)
     parser.add_argument("--max-completion-length", type=int, default=512)
@@ -1194,6 +1229,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--disable-4bit", action="store_true")
+    parser.add_argument("--disable-gradient-checkpointing", action="store_true")
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--baseline-eval", action="store_true")
     parser.add_argument("--evaluation-episodes", type=int, default=20)
@@ -1201,6 +1237,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable-wandb", action="store_true")
     parser.add_argument("--wandb-project", default="adapt-dsa-tutor")
     parser.add_argument("--wandb-run-name", default=None)
+    parser.add_argument("--save-merged-model", action="store_true")
     parser.add_argument("--trace-logging-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--checkpoint-log-interval-steps", type=int, default=10)
     parser.add_argument(

@@ -104,6 +104,16 @@ def validate_problem(problem_dict: dict[str, Any]) -> bool:
     return True
 
 
+def normalize_problem(problem_dict: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(problem_dict)
+    normalized["problem"] = str(problem_dict.get("problem", "")).strip()
+    normalized["input_format"] = str(problem_dict.get("input_format", "")).strip()
+    normalized["constraints"] = str(problem_dict.get("constraints", "")).strip()
+    normalized["test_cases"] = [dict(test_case) for test_case in problem_dict.get("test_cases", [])]
+    normalized["visible_problem"] = dict(problem_dict.get("visible_problem", {}))
+    return normalized
+
+
 class GeneratorAgent:
     """Deterministic, dependency-free generator for DSA-style problems."""
 
@@ -157,8 +167,9 @@ class GeneratorAgent:
                 "generation_mode": "deterministic_fallback" if self.deterministic else "local_rule_based",
                 "validity_bonus": 0.15,
             }
-            if validate_problem(problem):
-                return problem
+            normalized_problem = normalize_problem(problem)
+            if validate_problem(normalized_problem):
+                return normalized_problem
 
         raise ValueError(f"Unable to generate a valid problem for template {template.problem_type}")
 

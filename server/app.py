@@ -46,7 +46,7 @@ class ResetRequest(BaseModel):
 
 
 class TrainRequest(BaseModel):
-    preset: str = "smoke"
+    preset: str = "l4"
     model_name: Optional[str] = None
     output_dir: Optional[str] = None
     dataset_size: Optional[int] = None
@@ -54,10 +54,13 @@ class TrainRequest(BaseModel):
     batch_size: Optional[int] = None
     gradient_accumulation_steps: Optional[int] = None
     num_generations: Optional[int] = None
+    load_in_4bit: Optional[bool] = None
+    gradient_checkpointing: Optional[bool] = None
     evaluation_episodes: Optional[int] = None
     baseline_eval: Optional[bool] = None
     generator_mode: Optional[str] = None
     disable_wandb: Optional[bool] = None
+    save_merged_model: Optional[bool] = None
 
 
 class RunTrainedPolicyRequest(BaseModel):

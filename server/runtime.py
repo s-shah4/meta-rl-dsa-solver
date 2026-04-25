@@ -161,7 +161,7 @@ class SpaceModelRegistry:
         return torch, AutoPeftModelForCausalLM, (AutoModelForCausalLM, AutoTokenizer)
 
     def _base_model_name(self) -> str:
-        return os.getenv("BASE_MODEL_NAME") or os.getenv("MODEL_NAME") or "unsloth/Llama-3.2-3B-Instruct"
+        return os.getenv("BASE_MODEL_NAME") or os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-3B-Instruct"
 
     def _active_generation_stack(
         self,
@@ -194,7 +194,12 @@ class SpaceModelRegistry:
                 )
                 return self.status_payload()
 
-            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+            if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+                dtype = torch.bfloat16
+            elif torch.cuda.is_available():
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
             tokenizer = AutoTokenizer.from_pretrained(base_model_name)
             if tokenizer.pad_token is None and tokenizer.eos_token is not None:
                 tokenizer.pad_token = tokenizer.eos_token
@@ -232,7 +237,12 @@ class SpaceModelRegistry:
             raise RuntimeError(f"Trained artifact directory does not exist: {artifact_dir}")
 
         with self._lock:
-            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+            if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+                dtype = torch.bfloat16
+            elif torch.cuda.is_available():
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
             tokenizer = AutoTokenizer.from_pretrained(str(artifact_dir))
             if tokenizer.pad_token is None and tokenizer.eos_token is not None:
                 tokenizer.pad_token = tokenizer.eos_token

@@ -54,6 +54,11 @@ nums = list(map(int, input().split()))
 print(nums[n])
 """
 
+safety_violation_code = """
+import os
+print(os.listdir("."))
+"""
+
 for name, code in [
     ("correct", correct_code),
     ("wrong", wrong_code),
@@ -61,6 +66,7 @@ for name, code in [
     ("invalid_output", invalid_output_code),
     ("timeout", timeout_code),
     ("runtime_error", runtime_error_code),
+    ("safety_violation", safety_violation_code),
 ]:
     reward, info = verify(code, test_cases)
 
@@ -77,5 +83,10 @@ for name, code in [
 
 reward_optimal, info_optimal = verify(correct_code, test_cases)
 reward_less_optimal, info_less_optimal = verify(less_optimized_code, test_cases)
+reward_safety, info_safety = verify(safety_violation_code, test_cases)
 assert info_optimal["efficiency_score"] > info_less_optimal["efficiency_score"]
 assert info_less_optimal["complexity_signals"]["list_comprehensions"] > 0
+assert info_optimal["verifier_components"]["hidden_correctness"] == 1.0
+assert info_optimal["verifier_components"]["anti_cheat_compliance"] == 1.0
+assert reward_safety == 0.0
+assert info_safety["execution_status"] == "safety_violation"

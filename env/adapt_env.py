@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import ast
 from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
 from env.generator import DIFFICULTY_LABELS, GeneratorAgent, generator_reward, validate_problem
 from models import AdaptAction, AdaptObservation, AdaptState
-from verifier.metrics import compute_reward
+from verifier.metrics import compute_episode_reward
+from verifier.verifier import verify
 
 try:
     from openenv.core.env_server.interfaces import Environment
@@ -22,7 +22,6 @@ except ImportError:
             pass
 
 
-FORBIDDEN_IMPORTS = {"os", "pathlib", "shutil", "socket", "subprocess"}
 MAX_STEPS_PER_EPISODE = 3
 TARGET_EFFICIENCY_SCORE = 0.95
 
@@ -158,76 +157,27 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         previous_status = self.previous_execution_status
         previous_pass_rate = float(self._state.last_pass_rate or 0.0)
 
-        syntax_ok, syntax_error = self._check_syntax(action.code)
-        if not syntax_ok:
-            done = attempt_number >= MAX_STEPS_PER_EPISODE
-            observation = self._build_observation(
-                reward=0.0,
-                done=done,
-                feedback=self._format_static_feedback(
-                    attempt_number=attempt_number,
-                    previous_status=previous_status,
-                    execution_status="syntax_error",
-                    details=f"Syntax error: {syntax_error}",
-                ),
-                syntax_valid=False,
-                execution_status="syntax_error",
-                reward_components={
-                    "correctness": 0.0,
-                    "step_discount": 1.0 if attempt_number == 1 else (0.85 if attempt_number == 2 else 0.70),
-                    "progress_delta": 0.0,
-                },
-            )
-            self.last_results = []
-            self.previous_execution_status = observation.execution_status
-            self._record_metrics(observation)
-            if done:
-                self._finalize_episode(observation)
-            return observation
-
-        safety_ok, safety_error = self._check_safety(action.code)
-        if not safety_ok:
-            done = attempt_number >= MAX_STEPS_PER_EPISODE
-            observation = self._build_observation(
-                reward=0.0,
-                done=done,
-                feedback=self._format_static_feedback(
-                    attempt_number=attempt_number,
-                    previous_status=previous_status,
-                    execution_status="safety_violation",
-                    details=safety_error,
-                ),
-                syntax_valid=True,
-                execution_status="safety_violation",
-                reward_components={
-                    "correctness": 0.0,
-                    "step_discount": 1.0 if attempt_number == 1 else (0.85 if attempt_number == 2 else 0.70),
-                    "progress_delta": 0.0,
-                },
-            )
-            self.last_results = []
-            self.previous_execution_status = observation.execution_status
-            self._record_metrics(observation)
-            if done:
-                self._finalize_episode(observation)
-            return observation
-
-        _, metadata = self._verify_submission(action.code)
+        _, metadata = self._verify_submission(action.code, attempt_number=attempt_number)
         self.last_results = list(metadata.get("results", []))
+
         hidden_pass_rate = float(metadata.get("hidden_pass_rate", metadata.get("pass_rate", 0.0)))
         visible_pass_rate = float(metadata.get("visible_pass_rate", 0.0))
         execution_status = str(metadata.get("execution_status", "completed"))
+        syntax_valid = bool(metadata.get("syntax_valid", execution_status != "syntax_error"))
+        safety_valid = bool(metadata.get("safety_valid", execution_status != "safety_violation"))
+        error_detail = str(metadata.get("error", "")).strip()
         efficiency_score = float(metadata.get("efficiency_score", 0.0))
-        efficiency_target_met = hidden_pass_rate == 1.0 and efficiency_score >= TARGET_EFFICIENCY_SCORE
-        done = efficiency_target_met or attempt_number >= MAX_STEPS_PER_EPISODE
-        reward, reward_components = self._shape_reward(
+        optimization_target_met = hidden_pass_rate == 1.0 and efficiency_score >= TARGET_EFFICIENCY_SCORE
+        done = optimization_target_met or attempt_number >= MAX_STEPS_PER_EPISODE
+
+        reward, reward_components = compute_episode_reward(
             pass_rate=hidden_pass_rate,
             step_number=attempt_number,
             execution_status=execution_status,
             previous_pass_rate=previous_pass_rate,
             done=done,
             efficiency_score=efficiency_score,
-            optimization_target_met=efficiency_target_met,
+            optimization_target_met=optimization_target_met,
         )
         feedback = self._format_feedback(
             results=self.last_results,
@@ -238,8 +188,19 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
             visible_pass_rate=visible_pass_rate,
             efficiency_score=efficiency_score,
             optimization_hints=list(metadata.get("optimization_hints", [])),
-            optimization_target_met=efficiency_target_met,
+            optimization_target_met=optimization_target_met,
+            error_detail=error_detail,
         )
+
+        reward_components.update(
+            {
+                "format_compliance": round(float(metadata.get("format_compliance", 0.0)), 4),
+                "anti_cheat_compliance": round(1.0 if safety_valid and syntax_valid else 0.0, 4),
+                "hidden_correctness": round(hidden_pass_rate, 4),
+                "visible_correctness": round(visible_pass_rate, 4),
+            }
+        )
+
         observation = self._build_observation(
             reward=reward,
             done=done,
@@ -247,7 +208,7 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
             pass_rate=hidden_pass_rate,
             visible_pass_rate=visible_pass_rate,
             hidden_pass_rate=hidden_pass_rate,
-            syntax_valid=True,
+            syntax_valid=syntax_valid,
             execution_status=execution_status,
             timeout_count=int(metadata.get("timeout_count", 0)),
             runtime_error_count=int(metadata.get("runtime_error_count", 0)),
@@ -337,23 +298,15 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
             raise ValueError("Generator produced an invalid problem twice in a row.")
         return fallback
 
-    def _verify_submission(self, code: str) -> tuple[float, dict[str, Any]]:
+    def _verify_submission(self, code: str, *, attempt_number: int) -> tuple[float, dict[str, Any]]:
         try:
-            from verifier.verifier import verify
-        except ImportError as exc:
-            return 0.0, {
-                "feedback": f"Verifier unavailable: {exc}",
-                "execution_status": "verifier_error",
-                "results": [],
-            }
-
-        try:
-            reward, metadata = verify(code, self.test_cases)
+            reward, metadata = verify(code, self.test_cases, step_number=attempt_number)
         except Exception as exc:
             return 0.0, {
                 "feedback": f"Verifier crashed: {exc}",
                 "execution_status": "verifier_error",
                 "results": [],
+                "error": str(exc),
             }
 
         metadata = dict(metadata or {})
@@ -367,48 +320,6 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         )
         return float(reward), metadata
 
-    def _shape_reward(
-        self,
-        pass_rate: float,
-        step_number: int,
-        execution_status: str,
-        previous_pass_rate: float,
-        done: bool,
-        efficiency_score: float,
-        optimization_target_met: bool,
-    ) -> tuple[float, dict[str, float]]:
-        step_discount = 1.0 if step_number == 1 else (0.85 if step_number == 2 else 0.70)
-        progress_delta = max(0.0, float(pass_rate) - float(previous_pass_rate))
-        efficiency_score = max(0.0, min(float(efficiency_score), 1.0))
-
-        if execution_status in {"timeout", "syntax_error", "safety_violation"}:
-            reward = 0.0
-        elif pass_rate == 1.0:
-            reward = round(
-                compute_reward(
-                pass_rate=pass_rate,
-                step_number=step_number,
-                execution_status=execution_status,
-                format_compliance=0.0,
-                )
-                * (0.6 + 0.4 * efficiency_score),
-                4,
-            )
-            if not optimization_target_met and not done:
-                reward = min(reward, 0.94)
-        elif done:
-            reward = 0.0
-        else:
-            reward = round(0.1 * progress_delta, 4)
-
-        return reward, {
-            "correctness": round(float(pass_rate), 4),
-            "efficiency_score": round(efficiency_score, 4),
-            "step_discount": round(step_discount, 4),
-            "progress_delta": round(progress_delta, 4),
-            "reward": round(float(reward), 4),
-        }
-
     def _format_feedback(
         self,
         results: list[dict[str, Any]],
@@ -420,7 +331,16 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         efficiency_score: float,
         optimization_hints: list[str],
         optimization_target_met: bool,
+        error_detail: str,
     ) -> str:
+        if execution_status in {"syntax_error", "safety_violation"}:
+            return self._format_static_feedback(
+                attempt_number=attempt_number,
+                previous_status=previous_status,
+                execution_status=execution_status,
+                details=error_detail or execution_status.replace("_", " ").title(),
+            )
+
         lines = [
             f"Attempt {attempt_number}/{MAX_STEPS_PER_EPISODE}.",
             f"Previous attempt status: {previous_status}.",
@@ -556,9 +476,7 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
             return ""
         chunks = []
         for test_case in visible_cases:
-            chunks.append(
-                f"Input:\n{test_case['input']}Expected Output:\n{test_case['output']}\n"
-            )
+            chunks.append(f"Input:\n{test_case['input']}Expected Output:\n{test_case['output']}\n")
         return "\n".join(chunks).rstrip()
 
     def _diversity_bonus(self, problem_type: str) -> float:
@@ -568,29 +486,6 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         if problem_type in recent_types:
             return 0.0
         return 0.1
-
-    def _check_syntax(self, code: str) -> tuple[bool, str]:
-        try:
-            ast.parse(code)
-        except SyntaxError as exc:
-            return False, str(exc)
-        return True, ""
-
-    def _check_safety(self, code: str) -> tuple[bool, str]:
-        tree = ast.parse(code)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    root_name = alias.name.split(".", 1)[0]
-                    if root_name in FORBIDDEN_IMPORTS:
-                        return False, f"Forbidden import: {root_name}"
-
-            if isinstance(node, ast.ImportFrom):
-                root_name = (node.module or "").split(".", 1)[0]
-                if root_name in FORBIDDEN_IMPORTS:
-                    return False, f"Forbidden import: {root_name}"
-
-        return True, ""
 
     def _tier_to_difficulty(self, tier: int) -> str:
         return DIFFICULTY_LABELS.get(tier, "easy")

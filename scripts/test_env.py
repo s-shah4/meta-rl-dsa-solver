@@ -46,6 +46,7 @@ def main() -> None:
     assert correct.execution_status == "completed"
     assert correct.done is True
     assert correct.reward_components["efficiency_score"] >= 0.95
+    assert correct.reward_components["hidden_correctness"] == 1.0
 
     observation = env.reset(problem_id="running_total", difficulty="easy")
     repair_1 = env.step(
@@ -98,6 +99,7 @@ def main() -> None:
     assert less_optimized.done is False
     assert less_optimized.reward < 1.0
     assert "can still be optimized further" in less_optimized.feedback
+    assert less_optimized.reward_components["format_compliance"] == 1.0
 
     observation = env.reset(problem_id="sum_even_numbers", difficulty="easy")
     syntax = env.step(AdaptAction(code="def broken(:\n    pass"))
@@ -130,6 +132,7 @@ def main() -> None:
     assert unsafe.reward == 0.0
     assert unsafe.execution_status == "safety_violation"
     assert unsafe.done is False
+    assert unsafe.reward_components["anti_cheat_compliance"] == 0.0
 
     assert env.state.history["attempts"]
     assert_hidden_tests_are_not_exposed(timeout.model_dump())

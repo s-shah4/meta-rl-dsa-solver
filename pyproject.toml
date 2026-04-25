@@ -7,8 +7,9 @@ name = "adapt-dsa-tutor"
 version = "0.2.0"
 description = "OpenEnv-compliant adversarial DSA tutor environment for RLVR code generation."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.12"
 dependencies = [
+    "gradio>=6.0.0",
     "openenv-core>=0.2.3",
     "fastapi>=0.104.0",
     "pydantic>=2.0.0",
