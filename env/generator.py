@@ -109,17 +109,43 @@ def normalize_problem(problem_dict: dict[str, Any]) -> dict[str, Any]:
     normalized["problem"] = str(problem_dict.get("problem", "")).strip()
     normalized["input_format"] = str(problem_dict.get("input_format", "")).strip()
     normalized["constraints"] = str(problem_dict.get("constraints", "")).strip()
-    normalized["test_cases"] = [dict(test_case) for test_case in problem_dict.get("test_cases", [])]
-    normalized["visible_problem"] = dict(problem_dict.get("visible_problem", {}))
+    normalized_cases: list[dict[str, Any]] = []
+    for test_case in problem_dict.get("test_cases", []):
+        case = dict(test_case)
+        if "output" not in case and "expected_output" in case:
+            case["output"] = case.get("expected_output")
+        if "is_visible" not in case and "visible" in case:
+            case["is_visible"] = bool(case.get("visible"))
+        normalized_cases.append(case)
+    normalized["test_cases"] = normalized_cases
+    normalized_visible = dict(problem_dict.get("visible_problem", {}))
+    examples = normalized_visible.get("examples")
+    if isinstance(examples, list):
+        normalized_visible["examples"] = [dict(example) for example in examples]
+    normalized["visible_problem"] = normalized_visible
     return normalized
 
 
 class GeneratorAgent:
     """Deterministic, dependency-free generator for DSA-style problems."""
 
-    def __init__(self, deterministic: bool = True) -> None:
+    def __init__(
+        self,
+        deterministic: bool = True,
+        use_dataset: bool = False,
+        dataset_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         self.deterministic = deterministic
+        self._use_dataset = use_dataset
+        self._dataset_kwargs = dict(dataset_kwargs or {})
         self.templates = _build_templates()
+        self._bank = None
+
+    def _ensure_bank(self) -> None:
+        if self._bank is None:
+            from env.dataset_loader import get_problem_bank
+
+            self._bank = get_problem_bank(**self._dataset_kwargs)
 
     def generate_problem(
         self,
@@ -130,6 +156,30 @@ class GeneratorAgent:
     ) -> dict[str, Any]:
         history = history or {}
         target_tier = _difficulty_to_tier(difficulty_level)
+
+        if self._use_dataset:
+            self._ensure_bank()
+            if problem_id:
+                try:
+                    problem = self._bank.get_by_id(problem_id)
+                except KeyError:
+                    problem = None
+                if problem is not None:
+                    normalized_problem = normalize_problem(problem)
+                    if validate_problem(normalized_problem):
+                        return normalized_problem
+
+            rng = self._rng_for(target_tier, history, problem_id, family_weights or {})
+            problem = self._bank.sample(
+                self._difficulty_to_label(self._tier_to_scalar(target_tier)),
+                rng,
+                list(history.get("problem_types", [])),
+            )
+            if problem is not None:
+                normalized_problem = normalize_problem(problem)
+                if validate_problem(normalized_problem):
+                    return normalized_problem
+
         rng = self._rng_for(target_tier, history, problem_id, family_weights or {})
         template = self._choose_template(
             target_tier,
@@ -249,6 +299,27 @@ class GeneratorAgent:
 
     def _tier_to_scalar(self, tier: int) -> float:
         return {1: 0.25, 2: 0.5, 3: 0.75}.get(tier, 0.5)
+
+    def _difficulty_to_label(self, difficulty: float) -> str:
+        if difficulty < 0.35:
+            return "easy"
+        if difficulty < 0.70:
+            return "medium"
+        return "hard"
+
+    def problem_types_for_difficulty(self, difficulty: str) -> list[str]:
+        if self._use_dataset:
+            self._ensure_bank()
+            return self._bank.problem_types_for_difficulty(difficulty)
+
+        normalized = str(difficulty).strip().lower()
+        return sorted(
+            {
+                template.problem_type
+                for template in self.templates
+                if DIFFICULTY_LABELS.get(template.difficulty_tier) == normalized
+            }
+        )
 
 
 def _difficulty_to_tier(difficulty_level: int | float | str) -> int:

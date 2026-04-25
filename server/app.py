@@ -59,6 +59,9 @@ class TrainRequest(BaseModel):
     evaluation_episodes: Optional[int] = None
     baseline_eval: Optional[bool] = None
     generator_mode: Optional[str] = None
+    use_dataset: bool = False
+    dataset_name: str = "deepmind/code_contests"
+    dataset_max_problems: int = 5000
     disable_wandb: Optional[bool] = None
     save_merged_model: Optional[bool] = None
 

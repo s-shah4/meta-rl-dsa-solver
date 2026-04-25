@@ -14,9 +14,9 @@ def verify(
     step_number: int = 1,
 ) -> tuple[float, dict[str, Any]]:
     precheck = validate_code(code)
-    complexity = analyze_code_complexity(code)
 
     if not precheck["syntax_ok"] or not precheck["safety_ok"]:
+        complexity = analyze_code_complexity(code)
         reward, metrics = compute_pass_rate(
             [],
             step_number=step_number,
@@ -32,6 +32,9 @@ def verify(
             "results": [],
             "error": str(precheck["error"]),
         }
+
+    probe_inputs = _build_probe_inputs(test_cases)
+    complexity = analyze_code_complexity(code, probe_inputs=probe_inputs)
 
     results: list[dict[str, Any]] = []
     for index, test_case in enumerate(test_cases):
@@ -89,6 +92,24 @@ def verify(
         "feedback": feedback,
         "results": results,
     }
+
+
+def _build_probe_inputs(test_cases: list[dict[str, Any]] | list[tuple[str, str]]) -> list[str]:
+    inputs: list[str] = []
+    for test_case in test_cases:
+        if isinstance(test_case, dict):
+            raw_input = test_case.get("input")
+        elif test_case:
+            raw_input = test_case[0]
+        else:
+            raw_input = None
+        if isinstance(raw_input, str):
+            inputs.append(raw_input)
+
+    inputs_sorted = sorted(set(inputs), key=len)
+    if len({len(item) for item in inputs_sorted}) < 3:
+        return []
+    return inputs_sorted
 
 
 def _build_feedback(metrics: dict[str, Any], *, error: str = "") -> str:

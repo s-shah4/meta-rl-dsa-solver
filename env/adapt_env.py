@@ -33,10 +33,15 @@ class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):
         self,
         generator: GeneratorAgent | None = None,
         generator_mode: str = "heuristic",
+        use_dataset: bool = False,
+        dataset_kwargs: dict[str, Any] | None = None,
         session_id: str | None = None,
     ) -> None:
         super().__init__()
-        self.generator = generator or GeneratorAgent()
+        self.generator = generator or GeneratorAgent(
+            use_dataset=use_dataset,
+            dataset_kwargs=dataset_kwargs or {},
+        )
         self.generator_mode = generator_mode
         self.session_id = session_id or str(uuid4())
         self.problem: dict[str, Any] = {}

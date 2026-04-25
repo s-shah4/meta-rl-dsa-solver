@@ -5,7 +5,13 @@ from typing import Any
 from env.generator import DIFFICULTY_LABELS, GeneratorAgent, VISIBLE_TEST_COUNT
 
 
-def load_problem_bank() -> list[dict[str, Any]]:
+def load_problem_bank(use_dataset: bool = False) -> list[dict[str, Any]]:
+    if use_dataset:
+        from env.dataset_loader import get_problem_bank
+
+        bank = get_problem_bank()
+        return [bank.get_by_id(problem_id) for problem_id in bank.all_problem_ids()[:200]]
+
     generator = GeneratorAgent()
     bank = []
     for template in generator.templates:

@@ -18,6 +18,12 @@ test_cases = [
     {"input": "5\n8 8 8 8 8\n", "output": "40", "is_visible": False},
 ]
 
+empirical_test_cases = [
+    {"input": "10\n", "output": "45", "is_visible": False},
+    {"input": "200\n", "output": "19900", "is_visible": False},
+    {"input": "1000\n", "output": "499500", "is_visible": False},
+]
+
 correct_code = """
 n = int(input())
 nums = list(map(int, input().split()))
@@ -90,3 +96,19 @@ assert info_optimal["verifier_components"]["hidden_correctness"] == 1.0
 assert info_optimal["verifier_components"]["anti_cheat_compliance"] == 1.0
 assert reward_safety == 0.0
 assert info_safety["execution_status"] == "safety_violation"
+
+linear_code = "n = int(input()); print(sum(range(n)))"
+quadratic_code = "n = int(input()); print(sum(i*j for i in range(n) for j in range(n)))"
+_, linear_result = verify(linear_code, empirical_test_cases)
+_, quadratic_result = verify(quadratic_code, empirical_test_cases)
+assert linear_result["efficiency_score"] >= quadratic_result["efficiency_score"], (
+    "Empirical complexity: O(n) should score >= O(n^2)"
+)
+
+small_alloc = "n = int(input()); print(n)"
+large_alloc = "n = int(input()); x = [0] * (n * 10000); print(len(x))"
+_, small_result = verify(small_alloc, empirical_test_cases)
+_, large_result = verify(large_alloc, empirical_test_cases)
+assert small_result["efficiency_score"] >= large_result["efficiency_score"], (
+    "Empirical complexity: small allocation should score >= large allocation"
+)

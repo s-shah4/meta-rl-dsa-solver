@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from scripts.test_dataset_mode import main as run_dataset_mode_smoke
 from scripts.test_env import main as run_env_smoke
 from scripts.test_space_api import main as run_space_api_smoke
 from scripts.test_training_config import main as run_training_config_smoke
@@ -9,6 +10,7 @@ from verifier.verifier import verify
 
 
 def main() -> None:
+    run_dataset_mode_smoke()
     run_env_smoke()
     run_space_api_smoke()
     run_training_config_smoke()

@@ -59,6 +59,9 @@ class TrainingConfig:
     wandb_run_name: str | None = None
     generator_mode: str = "reward_aware"
     non_deterministic_generator: bool = False
+    use_dataset: bool = False
+    dataset_name: str = "deepmind/code_contests"
+    dataset_max_problems: int = 5000
     trace_logging_enabled: bool = True
     checkpoint_log_interval_steps: int = 10
     save_merged_model: bool = False
@@ -207,6 +210,9 @@ def namespace_to_config(args: argparse.Namespace) -> TrainingConfig:
         wandb_run_name=args.wandb_run_name,
         generator_mode=args.generator_mode,
         non_deterministic_generator=args.non_deterministic_generator,
+        use_dataset=args.use_dataset,
+        dataset_name=args.dataset_name,
+        dataset_max_problems=args.dataset_max_problems,
         trace_logging_enabled=args.trace_logging_enabled,
         checkpoint_log_interval_steps=args.checkpoint_log_interval_steps,
         save_merged_model=getattr(args, "save_merged_model", False),
@@ -258,6 +264,8 @@ class GeneratorController:
     mode: str = "heuristic"
     deterministic: bool = True
     temperature: float = 0.5
+    use_dataset: bool = False
+    dataset_kwargs: dict[str, Any] = field(default_factory=dict)
     generator: GeneratorAgent = field(init=False)
     history: dict[str, Any] = field(
         default_factory=lambda: {
@@ -272,10 +280,14 @@ class GeneratorController:
     family_productivity: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.generator = GeneratorAgent(deterministic=self.deterministic)
+        self.generator = GeneratorAgent(
+            deterministic=self.deterministic,
+            use_dataset=self.use_dataset,
+            dataset_kwargs=self.dataset_kwargs,
+        )
         if not self.family_productivity:
             self.family_productivity = {
-                template.problem_type: 0.0 for template in self.generator.templates
+                family: 0.0 for family in self._known_problem_families()
             }
 
     @property
@@ -306,11 +318,14 @@ class GeneratorController:
         if self.mode != "reward_aware":
             return None
 
-        eligible = [
-            template.problem_type
-            for template in self.generator.templates
-            if DIFFICULTY_LABELS[template.difficulty_tier] == difficulty
-        ]
+        if self.use_dataset:
+            eligible = self.generator.problem_types_for_difficulty(difficulty)
+        else:
+            eligible = [
+                template.problem_type
+                for template in self.generator.templates
+                if DIFFICULTY_LABELS[template.difficulty_tier] == difficulty
+            ]
         if not eligible:
             return None
 
@@ -318,6 +333,14 @@ class GeneratorController:
         max_logit = max(logits)
         exp_values = [math.exp(logit - max_logit) for logit in logits]
         return {family: value for family, value in zip(eligible, exp_values)}
+
+    def _known_problem_families(self) -> list[str]:
+        if self.use_dataset:
+            families: set[str] = set()
+            for difficulty in ("easy", "medium", "hard"):
+                families.update(self.generator.problem_types_for_difficulty(difficulty))
+            return sorted(families)
+        return sorted({template.problem_type for template in self.generator.templates})
 
     def update(
         self,
@@ -695,6 +718,8 @@ def run_policy_evaluation(
     tokenizer: Any,
     generator_mode: str,
     deterministic_generator: bool,
+    use_dataset: bool,
+    dataset_kwargs: dict[str, Any],
     episodes: int,
     logger: TrainingLogger,
     phase: str,
@@ -703,6 +728,8 @@ def run_policy_evaluation(
     controller = GeneratorController(
         mode=generator_mode,
         deterministic=deterministic_generator,
+        use_dataset=use_dataset,
+        dataset_kwargs=dataset_kwargs,
     )
     schedule = ["easy"] * (episodes // 3 + (1 if episodes % 3 > 0 else 0))
     schedule += ["medium"] * (episodes // 3 + (1 if episodes % 3 > 1 else 0))
@@ -1050,6 +1077,11 @@ def run_training(
     controller = GeneratorController(
         mode="reward_aware" if config.generator_mode == "reward_aware" else "heuristic",
         deterministic=not config.non_deterministic_generator,
+        use_dataset=config.use_dataset,
+        dataset_kwargs={
+            "dataset_name": config.dataset_name,
+            "max_problems": config.dataset_max_problems,
+        },
     )
     logger = TrainingLogger(
         output_dir=output_dir,
@@ -1110,6 +1142,11 @@ def run_training(
             tokenizer=tokenizer,
             generator_mode=controller.mode,
             deterministic_generator=not config.non_deterministic_generator,
+            use_dataset=config.use_dataset,
+            dataset_kwargs={
+                "dataset_name": config.dataset_name,
+                "max_problems": config.dataset_max_problems,
+            },
             episodes=config.evaluation_episodes,
             logger=logger,
             phase="baseline_eval",
@@ -1206,6 +1243,11 @@ def run_training(
             tokenizer=tokenizer,
             generator_mode=controller.mode,
             deterministic_generator=not config.non_deterministic_generator,
+            use_dataset=config.use_dataset,
+            dataset_kwargs={
+                "dataset_name": config.dataset_name,
+                "max_problems": config.dataset_max_problems,
+            },
             episodes=config.evaluation_episodes,
             logger=logger,
             phase="trained_eval",
@@ -1290,6 +1332,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable deterministic fallback seeding for generator rollouts.",
     )
+    parser.add_argument("--use-dataset", action="store_true")
+    parser.add_argument("--dataset-name", default="deepmind/code_contests")
+    parser.add_argument("--dataset-max-problems", type=int, default=5000)
     return parser
 
 
