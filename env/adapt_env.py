@@ -23,7 +23,7 @@ except ImportError:
 
 
 MAX_STEPS_PER_EPISODE = 3
-TARGET_EFFICIENCY_SCORE = 0.95
+TARGET_EFFICIENCY_SCORE = 0.89
 
 
 class AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState]):

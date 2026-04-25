@@ -25,6 +25,7 @@ ADAPT is built to stress exactly those capabilities:
 - visible examples plus hidden evaluation tests
 - multi-step repair with feedback between attempts
 - reward-aware problem generation that shifts toward the most educational families
+- optional dataset-backed problem loading for competitive-programming style tasks
 
 ## Architecture
 
@@ -61,7 +62,7 @@ Each episode allows up to 3 attempts on the same problem.
 1. Attempt 1: the agent submits a first solution.
 2. Feedback: ADAPT reports the current execution status, hidden pass rate, visible pass rate, and which visible/hidden tests failed.
 3. Attempt 2 or 3: the agent repairs its code using that feedback.
-4. The episode ends early if all hidden tests pass.
+4. The episode ends early if all hidden tests pass and the solution clears the efficiency target.
 
 Concrete example:
 
@@ -94,10 +95,17 @@ That repair loop is the core novelty of ADAPT: the model is rewarded for debuggi
 
 ## Reward function
 
-ADAPT uses a clean reward signal driven by hidden correctness:
+ADAPT uses hidden correctness as the base signal, then folds in efficiency once a submission is fully correct:
 
 ```python
-reward = hidden_pass_rate * step_discount
+if execution_status in {"syntax_error", "safety_violation", "timeout"}:
+    reward = 0.0
+elif hidden_pass_rate == 1.0:
+    reward = step_discount * (0.6 + 0.4 * efficiency_score)
+elif done:
+    reward = 0.0
+else:
+    reward = 0.1 * max(0.0, hidden_pass_rate - previous_hidden_pass_rate)
 ```
 
 Where:
@@ -105,12 +113,15 @@ Where:
 - `step_discount = 1.00` on attempt 1
 - `step_discount = 0.85` on attempt 2
 - `step_discount = 0.70` on attempt 3
+- `efficiency_score` is computed from time and space signals in `verifier/complexity.py`
+- early completion requires `hidden_pass_rate == 1.0` and `efficiency_score >= 0.89`
 
 Additional shaping for the repair loop:
 
 - if a failed non-terminal attempt improves hidden pass rate, reward = `0.1 * delta_pass_rate`
 - if the final attempt still fails, reward = `0.0`
-- timeouts and syntax errors always get `0.0`
+- timeouts, syntax errors, and safety violations always get `0.0`
+- a fully-correct but still-suboptimal solution is capped below the terminal max until it meets the efficiency target
 
 Examples:
 
@@ -118,6 +129,15 @@ Examples:
 - attempt 2 solves all 8 hidden tests: reward = `0.85`
 - attempt 1 improves from `0.25` to `0.50` hidden pass rate on a retry trajectory: reward = `0.025`
 - attempt 3 still fails: reward = `0.0`
+
+### Efficiency signal
+
+When there are at least three probe inputs with distinct size hints, ADAPT measures empirical runtime and memory growth by replaying the submission on a small subset of tests.
+
+- probe inputs are deduplicated, sorted by a numeric size hint parsed from the first token of the first non-empty line, and capped at 5 probes
+- if no numeric size hint is available, ADAPT falls back to raw input length
+- empirical complexity falls back to the static AST heuristic if the probe run errors, times out, or lacks enough size variation
+- this keeps the reward signal stable for standard competitive-programming inputs where the first integer usually represents problem size
 
 ## Problem families
 
@@ -133,6 +153,15 @@ Every family has:
 - 2 visible example tests
 - 8 hidden evaluation tests
 - a reference solver that auto-generates expected outputs
+
+## Dataset-backed mode
+
+ADAPT can also sample problems from a dataset-backed bank, such as `deepmind/code_contests`, instead of the built-in template families.
+
+- dataset rows are normalized into the same canonical schema used by the deterministic generator
+- expected outputs are never truncated; rows with outputs longer than `4096` characters are rejected during normalization
+- duplicate normalized inputs are rejected so dataset problems still satisfy the environment validator
+- the end-to-end smoke test for this path lives in `scripts/test_dataset_mode.py`
 
 ## Self-improving curriculum
 
@@ -231,10 +260,26 @@ python training\train_grpo.py ^
   --output-dir outputs_l4
 ```
 
+To train against the dataset-backed bank instead of the local templates:
+
+```powershell
+python training\train_grpo.py ^
+  --generator-mode reward_aware ^
+  --use-dataset ^
+  --dataset-name deepmind/code_contests ^
+  --output-dir outputs_dataset
+```
+
 ### 7. Plot the training curves
 
 ```powershell
 python training\plot_results.py outputs_l4\reward_curve.csv
+```
+
+### 8. Run the dataset smoke test
+
+```powershell
+python scripts\test_dataset_mode.py
 ```
 
 ## Hugging Face Space

@@ -53,6 +53,8 @@ def _normalise_row(raw_row: dict[str, Any], dataset_name: str) -> dict[str, Any]
     test_cases: list[dict[str, Any]] = []
     seen_inputs: set[str] = set()
     for index, (raw_input, raw_output) in enumerate(visible_pairs + hidden_pairs):
+        if len(str(raw_output or "")) > MAX_IO_CHARS:
+            return None
         normalized_input = _normalize_io_text(raw_input, ensure_trailing_newline=True)
         normalized_output = _normalize_io_text(raw_output, ensure_trailing_newline=False)
         if not normalized_input or normalized_input in seen_inputs:

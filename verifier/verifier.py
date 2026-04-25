@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from verifier.complexity import analyze_code_complexity
+from verifier.complexity import analyze_code_complexity, size_hint_from_input
 from verifier.metrics import compute_pass_rate
 from verifier.sandbox import run_code, validate_code
 
@@ -106,10 +106,11 @@ def _build_probe_inputs(test_cases: list[dict[str, Any]] | list[tuple[str, str]]
         if isinstance(raw_input, str):
             inputs.append(raw_input)
 
-    inputs_sorted = sorted(set(inputs), key=len)
-    if len({len(item) for item in inputs_sorted}) < 3:
+    inputs_sorted = sorted(set(inputs), key=lambda item: (size_hint_from_input(item), len(item), item))
+    capped_inputs = inputs_sorted[:5]
+    if len({size_hint_from_input(item) for item in capped_inputs}) < 3:
         return []
-    return inputs_sorted
+    return capped_inputs
 
 
 def _build_feedback(metrics: dict[str, Any], *, error: str = "") -> str:

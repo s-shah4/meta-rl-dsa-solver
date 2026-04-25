@@ -86,6 +86,20 @@ def _probe_timeout() -> float:
     return timeout if timeout > 0 else PROBE_TIMEOUT_SECONDS
 
 
+def size_hint_from_input(input_text: str) -> float:
+    text = str(input_text or "")
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        token = stripped.split()[0]
+        try:
+            return float(int(token))
+        except ValueError:
+            break
+    return float(len(text))
+
+
 def _build_measurement_harness(code: str) -> str:
     return f"""
 import sys as _adapt_sys
@@ -257,7 +271,7 @@ def _empirical_complexity(code: str, probe_inputs: list[str]) -> dict[str, Any]:
         wall_ms, peak_kb = _parse_harness_output(str(result.get("stderr", "")))
         if wall_ms <= 0.0 and peak_kb <= 0.0:
             return heuristic
-        sizes.append(float(len(probe_input)))
+        sizes.append(size_hint_from_input(probe_input))
         times.append(float(wall_ms))
         mem_peaks.append(float(peak_kb))
 

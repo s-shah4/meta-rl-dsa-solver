@@ -83,6 +83,30 @@ def main() -> None:
             )
         )
         assert result.pass_rate == 1.0
+        assert result.execution_status == "completed"
+        assert result.reward > 0.0
+        assert 0.0 <= result.reward_components.get("efficiency_score", -1.0) <= 1.0
+
+        injected_env = AdaptEnvironment()
+        injected_env.reset(
+            difficulty="easy",
+            generated_problem=dataset_problem,
+            session_id="dataset-smoke",
+        )
+        injected_result = injected_env.step(
+            AdaptAction(
+                session_id="dataset-smoke",
+                code=(
+                    "n=int(input())\n"
+                    "nums=list(map(int,input().split()))\n"
+                    "print(sum(x for x in nums if x % 2 == 0))"
+                )
+            )
+        )
+        assert injected_result.pass_rate == 1.0
+        assert injected_result.execution_status == "completed"
+        assert injected_result.reward > 0.0
+        assert 0.0 <= injected_result.reward_components.get("efficiency_score", -1.0) <= 1.0
         print("Dataset mode smoke tests passed")
     finally:
         dataset_loader._BANK = original_bank
