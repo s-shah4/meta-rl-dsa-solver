@@ -1,35 +1,7 @@
 spec_version: 1
-name: adapt_dsa_tutor
-type: space
+name: adapt-dsa-tutor
+version: "0.3.0"
 runtime: fastapi
 app: server.app:app
 port: 7860
-description: "ADAPT: an adversarial DSA tutor environment for RLVR code generation with hidden tests, tiered problems, and anti-hacking reward signals."
-version: "0.2.0"
-
-observation_space:
-  type: dict
-  description: "Problem prompt, examples, visible tests, difficulty metadata, reward, pass rates, execution status, and feedback."
-
-action_space:
-  type: dict
-  description: "AdaptAction with a Python code string submitted for stdin/stdout evaluation."
-
-reward_range: [0.0, 1.0]
-
-tasks:
-  - name: easy_double
-    description: "Easy arithmetic stdin/stdout problem."
-    difficulty: easy
-  - name: easy_sum_two
-    description: "Easy two-integer arithmetic problem."
-    difficulty: easy
-  - name: medium_maximum
-    description: "Medium array scanning problem."
-    difficulty: medium
-  - name: medium_count_even
-    description: "Medium counting problem over a list."
-    difficulty: medium
-  - name: hard_reverse_words
-    description: "Harder string normalization and ordering problem."
-    difficulty: hard
+description: "Adversarial DSA Programming Tutor - RL environment for training LLMs to solve algorithmic problems through adaptive curriculum and self-repair"

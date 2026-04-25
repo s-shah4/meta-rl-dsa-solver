@@ -8,83 +8,171 @@ tags:
   - openenv
   - reinforcement-learning
   - code-generation
+  - llm-training
 ---
 
-# ADAPT DSA Tutor OpenEnv
+# ADAPT: Adversarial DSA Programming Tutor
 
-ADAPT, the Adversarial DSA Tutor, is an OpenEnv-compliant RLVR environment for training code-generation agents on small DSA tasks. The agent receives a problem prompt, examples, and visible tests, then submits Python code. The environment runs the code against visible and hidden tests and returns reward, pass-rate metrics, execution status, and feedback.
+LLMs are getting better at one-shot code generation, but they still struggle with the thing real engineers do all day: read feedback, debug, and repair. ADAPT closes that gap by turning algorithm practice into a self-repair RL environment where the model must improve over multiple attempts instead of guessing once.
 
-This repo includes the environment, verifier helpers, a baseline inference runner, and a GRPO training entrypoint so the full submission flow can be exercised from one codebase.
+## Why ADAPT exists
 
-## Why This Environment
+Most code-generation benchmarks test whether a model can land the answer immediately. They do not test whether the model can recover from partial failure, use examples productively, or adapt as the task distribution changes.
 
-The hackathon asks for OpenEnv environments that can improve LLM behavior through verifiable interaction. ADAPT targets a simple but useful skill loop:
+ADAPT is built to stress exactly those capabilities:
+
+- adaptive difficulty across easy, medium, and hard DSA families
+- visible examples plus hidden evaluation tests
+- multi-step repair with feedback between attempts
+- reward-aware problem generation that shifts toward the most educational families
+
+## Architecture
 
 ```text
-agent writes code -> environment executes it -> hidden tests and reward signals score it -> trainer improves the agent
++------------+     +-----------+     +----------+     +-----------+
+| Generator  | --> | Problem   | --> | Solver   | --> | Execution |
++------------+     +-----------+     +----------+     +-----------+
+      ^                                                        |
+      |                                                        v
+      +------------- Curriculum <- Reward <- Verification -----+
 ```
 
-The differentiator is curriculum-ready DSA practice: each episode carries a problem id and difficulty tier so training can track per-tier success instead of only aggregate reward.
+## What the agent sees, does, and gets rewarded for
 
-## OpenEnv Interface
+The agent sees a plain-English programming problem, the stdin format, constraints, and two worked examples. It writes Python code that reads from stdin and prints to stdout.
 
-The environment uses the latest OpenEnv API shape:
+The environment executes that code on 10 tests per problem:
 
-- `AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState])`
-- `reset()` returns a typed observation.
-- `step(action)` accepts an `AdaptAction` with a Python `code` string.
-- `state` exposes episode id, step count, current problem id, difficulty, and recent metrics.
+- 2 visible tests shown as examples
+- 8 hidden tests used for the real pass-rate reward
 
-`openenv.yaml` points to:
+After each attempt, the environment returns:
 
-```yaml
-app: server.app:app
-port: 7860
+- hidden pass rate
+- visible pass rate
+- execution status such as `completed`, `wrong_answer`, `runtime_error`, or `timeout`
+- a compact list of which tests failed
+- enough context to try again on the same problem
+
+## Multi-step repair loop
+
+Each episode allows up to 3 attempts on the same problem.
+
+1. Attempt 1: the agent submits a first solution.
+2. Feedback: ADAPT reports the current execution status, hidden pass rate, visible pass rate, and which visible/hidden tests failed.
+3. Attempt 2 or 3: the agent repairs its code using that feedback.
+4. The episode ends early if all hidden tests pass.
+
+Concrete example:
+
+```text
+Problem family: running_total
+
+Attempt 1 code:
+print(sum(nums))
+
+Feedback:
+Attempt 1/3
+Previous attempt status: ready
+Current execution status: wrong_answer
+Hidden pass rate: 0.25
+Visible pass rate: 0.50
+Failed tests:
+- Visible test #2: wrong_answer (expected=5 3 10, got=10)
+- Hidden test #1: wrong_answer
+- Hidden test #4: wrong_answer
+
+Attempt 2 code:
+running = 0
+for x in nums:
+    running += x
+    out.append(str(running))
+print(" ".join(out))
 ```
 
-## Action
+That repair loop is the core novelty of ADAPT: the model is rewarded for debugging, not just for lucky first drafts.
+
+## Reward function
+
+ADAPT uses a clean reward signal driven by hidden correctness:
 
 ```python
-{
-    "code": "n = int(input())\nprint(n * 2)"
-}
+reward = hidden_pass_rate * step_discount
 ```
 
-## Observation
+Where:
 
-Reset and step observations include:
+- `step_discount = 1.00` on attempt 1
+- `step_discount = 0.85` on attempt 2
+- `step_discount = 0.70` on attempt 3
 
-- problem statement
-- input format
-- constraints
-- examples
-- visible tests
-- problem id
-- difficulty tier
-- feedback
-- pass rate, visible pass rate, and hidden pass rate
-- syntax/runtime/timeout status
-- reward components
+Additional shaping for the repair loop:
 
-Hidden test inputs and expected outputs are never returned in observations.
+- if a failed non-terminal attempt improves hidden pass rate, reward = `0.1 * delta_pass_rate`
+- if the final attempt still fails, reward = `0.0`
+- timeouts and syntax errors always get `0.0`
 
-## Reward
+Examples:
 
-Reward is clipped to `[0.0, 1.0]` and combines multiple environment-level signals:
+- attempt 1 solves all 8 hidden tests: reward = `1.0`
+- attempt 2 solves all 8 hidden tests: reward = `0.85`
+- attempt 1 improves from `0.25` to `0.50` hidden pass rate on a retry trajectory: reward = `0.025`
+- attempt 3 still fails: reward = `0.0`
 
-- correctness from visible and hidden pass rate
-- syntax validity
-- clean execution
-- output format compliance
-- timeout penalty
-- runtime error penalty
-- static safety rejection for dangerous imports such as `os`, `subprocess`, `socket`, `pathlib`, and `shutil`
+## Problem families
 
-If `verifier.verifier.verify(code, test_cases)` exists, the environment can use it as an optional reward augmentation. If the verifier is absent, the environment still works using executor-derived reward.
+ADAPT now covers 20 algorithmic families instead of a tiny fixed bank:
 
-## Local Setup
+- Easy: `sum_even_numbers`, `range_span`, `count_vowels`, `max_consecutive_ones`, `fizzbuzz_variant`, `running_total`
+- Medium: `count_local_peaks`, `longest_non_decreasing_run`, `two_sum_count`, `max_subarray_sum`, `group_anagrams_count`, `balanced_brackets`, `matrix_diagonal_sum`
+- Hard: `smallest_most_frequent`, `reverse_words`, `longest_common_subsequence`, `word_ladder_steps`, `merge_intervals`, `min_coins`, `rotate_matrix_90`
 
-Use Python `3.10+`.
+Every family has:
+
+- its own randomized case generator
+- 2 visible example tests
+- 8 hidden evaluation tests
+- a reference solver that auto-generates expected outputs
+
+## Self-improving curriculum
+
+ADAPT uses one curriculum authority in training: the `CurriculumManager` inside `training/train_grpo.py`.
+
+- promote threshold: `0.70`
+- demote threshold: `0.30`
+- moving-average window: `10` episodes
+
+On top of that, the generator tracks `family_productivity`, an EMA of how educational each family is:
+
+```text
+family_productivity[family] = 0.9 * old + 0.1 * generator_reward
+```
+
+Families that produce pass rates near the learning sweet spot, around `0.5`, become more likely to be sampled via a softmax distribution. This creates a closed loop:
+
+```text
+productive families -> more samples -> better learning signal -> updated family productivity
+```
+
+That makes ADAPT more than a static benchmark. The environment actively searches for the problems that teach the model the most.
+
+## Results
+
+[INSERT: reward curve plot]
+
+[INSERT: baseline vs trained table]
+
+Recommended artifacts to include here:
+
+- reward curve from `training/reward_curve.csv`
+- `reward_curve.png`
+- `pass_rate_by_difficulty.png`
+- `family_productivity.png`
+- one before/after repair example from baseline vs trained evaluation
+
+## How to run
+
+### 1. Install dependencies
 
 ```powershell
 cd C:\Users\kaust\PycharmProjects\meta-rl-dsa-solver
@@ -92,112 +180,78 @@ python -m venv .venv
 .\.venv\Scripts\pip install -e .
 ```
 
-For this local machine, the existing checked-out OpenEnv repo can also be used during development:
+For training and plotting, also install your training extras:
 
 ```powershell
-$env:PYTHONPATH="C:\Users\kaust\PycharmProjects\OpenEnv\src;$PWD"
+.\.venv\Scripts\pip install trl unsloth matplotlib wandb
 ```
 
-## Smoke Tests
-
-Run the local smoke test:
+### 2. Start the OpenEnv server
 
 ```powershell
-python test.py
+python server\app.py
 ```
 
-Check syntax:
+### 3. Reset an environment session
 
 ```powershell
-python -m py_compile models.py env\adapt_env.py env\executor.py env\test_cases.py server\app.py
+curl -X POST http://localhost:7860/reset ^
+  -H "Content-Type: application/json" ^
+  -d "{\"difficulty\":\"easy\"}"
 ```
 
-Start the OpenEnv server:
+The response includes a `session_id`. Reuse it for `step` and `state`.
+
+### 4. Submit code to `/step`
 
 ```powershell
-uvicorn server.app:app --host 0.0.0.0 --port 7860
+curl -X POST http://localhost:7860/step ^
+  -H "Content-Type: application/json" ^
+  -d "{\"session_id\":\"<SESSION_ID>\",\"code\":\"n=int(input())\nnums=list(map(int,input().split()))\nprint(sum(x for x in nums if x % 2 == 0))\"}"
 ```
 
-Useful endpoints:
-
-- `GET /`
-- `GET /health`
-- `GET /metadata`
-- `GET /tasks`
-- `GET /schema`
-- `POST /reset`
-- `POST /step`
-- `GET /state`
-- `POST /mcp`
-
-Example step request:
+### 5. Inspect current state
 
 ```powershell
-curl -X POST http://localhost:7860/step -H "Content-Type: application/json" -d "{\"action\":{\"code\":\"n=int(input())\nprint(n*2)\"}}"
+curl "http://localhost:7860/state?session_id=<SESSION_ID>"
 ```
 
-You can also send the raw action body:
+### 6. Run training
 
 ```powershell
-curl -X POST http://localhost:7860/step -H "Content-Type: application/json" -d "{\"code\":\"n=int(input())\nprint(n*2)\"}"
+python training\train_grpo.py ^
+  --generator-mode reward_aware ^
+  --baseline-eval ^
+  --output-dir outputs_v3
 ```
 
-Validate with OpenEnv once dependencies are installed:
+### 7. Plot the training curves
 
 ```powershell
-openenv validate .
+python training\plot_results.py outputs_v3\reward_curve.csv
 ```
 
-Run the verifier smoke test:
+## Hugging Face Space
 
-```powershell
-python scripts\test_verifier.py
-```
-
-Run the environment smoke test:
-
-```powershell
-python scripts\test_env.py
-```
-
-Run the baseline model loop:
-
-```powershell
-$env:HF_TOKEN="..."
-$env:API_BASE_URL="https://router.huggingface.co/v1"
-$env:MODEL_NAME="openai/gpt-oss-120b"
-python inference.py
-```
-
-Run GRPO training:
-
-```powershell
-python training\train_grpo.py --output-dir outputs_v2 --bf16
-```
-
-## Hugging Face Spaces
-
-This repo is Docker Space ready:
+This repo is designed to be hosted as an OpenEnv FastAPI Space.
 
 ```powershell
 openenv push --repo-id <your-hf-username>/adapt-dsa-tutor
 ```
 
-Before final submission, add:
+## Submission checklist
 
-- live Hugging Face Space link
-- training reward/loss plots from Disha's run
-- before/after code example showing a problem the model failed before training and solved after training
-- mini-blog or short video link
+- OpenEnv environment with `Environment`, `reset`, `step`, and `state`
+- valid `openenv.yaml`
+- Hugging Face Space deployment
+- GRPO training script with Unsloth + TRL
+- reward and pass-rate plots from a real run
+- baseline vs trained evaluation summary
+- Colab notebook link for reproducibility
 
-## Current Problem Bank
+## Links
 
-The environment includes a lightweight curated bank:
-
-- `easy_double`
-- `easy_sum_two`
-- `medium_maximum`
-- `medium_count_even`
-- `hard_reverse_words`
-
-This is intentionally small for submission-minimum stability. Later work can expand it to 30-50 tiered problems without changing the OpenEnv API.
+- HuggingFace Space URL: [HuggingFace Space URL]
+- Colab Training Notebook: [Colab Training Notebook]
+- HF Blog Post: [HF Blog Post]
+- YouTube Demo: [YouTube Demo]

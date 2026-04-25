@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from env.generator import DIFFICULTY_LABELS, GeneratorAgent
-
-VISIBLE_TEST_COUNT = 0
+from env.generator import DIFFICULTY_LABELS, GeneratorAgent, VISIBLE_TEST_COUNT
 
 
 def load_problem_bank() -> list[dict[str, Any]]:
