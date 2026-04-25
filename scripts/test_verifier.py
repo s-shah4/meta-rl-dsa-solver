@@ -9,7 +9,7 @@ test_cases = [
     ("999\n", "1998"),
 ]
 
-
+# ✅ define these FIRST
 correct_code = """
 n = int(input())
 print(n * 2)
@@ -20,9 +20,16 @@ n = int(input())
 print(n)
 """
 
+timeout_code = """
+while True:
+    pass
+"""
+
+# ✅ now use them
 for name, code in [
     ("correct", correct_code),
     ("wrong", wrong_code),
+    ("timeout", timeout_code),
 ]:
     reward, info = verify(code, test_cases)
 
@@ -30,3 +37,5 @@ for name, code in [
     print("Reward:", reward)
     print("Pass rate:", info["pass_rate"])
     print("Passed:", info["passed"], "/", info["total"])
+    print("Timeouts:", info["timeout_count"])
+    print("Errors:", info["error_count"])
