@@ -44,6 +44,7 @@ def _json_safe(value: Any) -> Any:
 @dataclass
 class ModelState:
     loaded: bool = False
+    active_model_kind: str = "unavailable"
     source_repo_id: str | None = None
     local_path: str | None = None
     revision: str | None = None
@@ -68,6 +69,24 @@ class TrainingJobState:
     reward_curve_csv: str | None = None
     model_repo_id: str | None = None
     uploaded_revision: str | None = None
+    phase: str = "idle"
+    completed_steps: int = 0
+    total_steps: int = 0
+    remaining_steps: int = 0
+    current_epoch: float = 0.0
+    epochs_remaining: float | None = None
+    progress_ratio: float = 0.0
+    train_episode_index: int = 0
+    current_difficulty: str | None = None
+    curriculum_level: int | None = None
+    last_problem_id: str | None = None
+    last_problem_family: str | None = None
+    last_pass_rate: float | None = None
+    last_visible_pass_rate: float | None = None
+    last_reward: float | None = None
+    last_execution_status: str | None = None
+    baseline_summary: dict[str, Any] = field(default_factory=dict)
+    trained_summary: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     traceback: str | None = None
 
@@ -86,6 +105,8 @@ class SpaceModelRegistry:
         self._lock = threading.RLock()
         self._model: Any = None
         self._tokenizer: Any = None
+        self._base_model: Any = None
+        self._base_tokenizer: Any = None
         self._state = ModelState(
             source_repo_id=os.getenv("HF_MODEL_REPO_ID"),
             base_model_name=os.getenv("BASE_MODEL_NAME"),
@@ -96,6 +117,7 @@ class SpaceModelRegistry:
         with self._lock:
             return ModelState(
                 loaded=self._state.loaded,
+                active_model_kind=self._state.active_model_kind,
                 source_repo_id=self._state.source_repo_id,
                 local_path=self._state.local_path,
                 revision=self._state.revision,
@@ -124,6 +146,63 @@ class SpaceModelRegistry:
                 "Model runtime dependencies are missing. Install `transformers`, `peft`, and `torch`."
             ) from exc
         return torch, AutoPeftModelForCausalLM, (AutoModelForCausalLM, AutoTokenizer)
+
+    def _base_model_name(self) -> str:
+        return os.getenv("BASE_MODEL_NAME") or os.getenv("MODEL_NAME") or "unsloth/Llama-3.2-3B-Instruct"
+
+    def _active_generation_stack(
+        self,
+        *,
+        allow_base_fallback: bool,
+    ) -> tuple[Any, Any, dict[str, Any]]:
+        with self._lock:
+            if self._model is not None and self._tokenizer is not None and self._state.loaded:
+                return self._model, self._tokenizer, self._state.to_dict()
+        if not allow_base_fallback:
+            raise RuntimeError("No trained model is loaded yet.")
+        base_state = self.load_base_model()
+        with self._lock:
+            if self._base_model is None or self._base_tokenizer is None:
+                raise RuntimeError("No model is available for generation.")
+            return self._base_model, self._base_tokenizer, base_state
+
+    def load_base_model(self) -> dict[str, Any]:
+        torch, _, model_components = self._require_runtime_dependencies()
+        AutoModelForCausalLM, AutoTokenizer = model_components
+        base_model_name = self._base_model_name()
+
+        with self._lock:
+            if self._base_model is not None and self._base_tokenizer is not None:
+                self._set_state(
+                    base_model_name=base_model_name,
+                    active_model_kind="base",
+                    loaded=True,
+                    error=None,
+                )
+                return self.status_payload()
+
+            dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+            tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+            if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+            model = AutoModelForCausalLM.from_pretrained(
+                base_model_name,
+                device_map="auto",
+                torch_dtype=dtype,
+            )
+            model.eval()
+            self._base_model = model
+            self._base_tokenizer = tokenizer
+            self._set_state(
+                loaded=True,
+                active_model_kind="base",
+                base_model_name=base_model_name,
+                local_path=base_model_name,
+                revision=None,
+                loaded_at=_utc_now(),
+                error=None,
+            )
+            return self.status_payload()
 
     def load_from_local(
         self,
@@ -163,6 +242,7 @@ class SpaceModelRegistry:
             self._tokenizer = tokenizer
             self._set_state(
                 loaded=True,
+                active_model_kind="trained",
                 source_repo_id=source_repo_id or self._state.source_repo_id,
                 local_path=str(artifact_dir.resolve()),
                 revision=revision,
@@ -180,6 +260,7 @@ class SpaceModelRegistry:
             with self._lock:
                 self._set_state(
                     loaded=False,
+                    active_model_kind="unavailable",
                     source_repo_id=None,
                     base_model_name=base_model_name,
                     error="HF_MODEL_REPO_ID is not configured.",
@@ -190,6 +271,7 @@ class SpaceModelRegistry:
             with self._lock:
                 self._set_state(
                     loaded=False,
+                    active_model_kind="unavailable",
                     source_repo_id=repo_id,
                     base_model_name=base_model_name,
                     error="HF_TOKEN is not configured.",
@@ -208,6 +290,7 @@ class SpaceModelRegistry:
             with self._lock:
                 self._set_state(
                     loaded=False,
+                    active_model_kind="unavailable",
                     source_repo_id=repo_id,
                     base_model_name=base_model_name,
                     error=f"Unable to fetch model repo metadata: {exc}",
@@ -230,12 +313,7 @@ class SpaceModelRegistry:
         difficulty: str | None = None,
         max_new_tokens: int = 512,
     ) -> dict[str, Any]:
-        with self._lock:
-            if self._model is None or self._tokenizer is None or not self._state.loaded:
-                raise RuntimeError("No trained model is loaded yet.")
-            model = self._model
-            tokenizer = self._tokenizer
-            model_state = self._state.to_dict()
+        model, tokenizer, model_state = self._active_generation_stack(allow_base_fallback=False)
 
         env = AdaptEnvironment()
         observation = env.reset(problem_id=problem_id, difficulty=difficulty)
@@ -290,12 +368,7 @@ class SpaceModelRegistry:
         max_steps: int = 1,
         max_new_tokens: int = 512,
     ) -> dict[str, Any]:
-        with self._lock:
-            if self._model is None or self._tokenizer is None or not self._state.loaded:
-                raise RuntimeError("No trained model is loaded yet.")
-            model = self._model
-            tokenizer = self._tokenizer
-            model_state = self._state.to_dict()
+        model, tokenizer, model_state = self._active_generation_stack(allow_base_fallback=True)
 
         prompt = build_solver_prompt(
             {
@@ -357,6 +430,24 @@ class SpaceTrainingManager:
                 reward_curve_csv=payload.get("reward_curve_csv"),
                 model_repo_id=payload.get("model_repo_id"),
                 uploaded_revision=payload.get("uploaded_revision"),
+                phase=payload.get("phase", "idle"),
+                completed_steps=int(payload.get("completed_steps", 0) or 0),
+                total_steps=int(payload.get("total_steps", 0) or 0),
+                remaining_steps=int(payload.get("remaining_steps", 0) or 0),
+                current_epoch=float(payload.get("current_epoch", 0.0) or 0.0),
+                epochs_remaining=payload.get("epochs_remaining"),
+                progress_ratio=float(payload.get("progress_ratio", 0.0) or 0.0),
+                train_episode_index=int(payload.get("train_episode_index", 0) or 0),
+                current_difficulty=payload.get("current_difficulty"),
+                curriculum_level=payload.get("curriculum_level"),
+                last_problem_id=payload.get("last_problem_id"),
+                last_problem_family=payload.get("last_problem_family"),
+                last_pass_rate=payload.get("last_pass_rate"),
+                last_visible_pass_rate=payload.get("last_visible_pass_rate"),
+                last_reward=payload.get("last_reward"),
+                last_execution_status=payload.get("last_execution_status"),
+                baseline_summary=payload.get("baseline_summary", {}),
+                trained_summary=payload.get("trained_summary", {}),
                 error=payload.get("error"),
                 traceback=payload.get("traceback"),
             )
@@ -368,6 +459,26 @@ class SpaceTrainingManager:
             json.dumps(_json_safe(self._job.to_dict()), indent=2),
             encoding="utf-8",
         )
+
+    def _update_progress(self, updates: dict[str, Any]) -> None:
+        with self._lock:
+            for key, value in updates.items():
+                if hasattr(self._job, key) and value is not None:
+                    setattr(self._job, key, value)
+            self._job.total_steps = int(self._job.config.get("max_steps", self._job.total_steps or 0) or 0)
+            self._job.completed_steps = min(int(self._job.completed_steps), int(self._job.total_steps or self._job.completed_steps))
+            self._job.remaining_steps = max(int(self._job.total_steps) - int(self._job.completed_steps), 0)
+            self._job.progress_ratio = (
+                round(float(self._job.completed_steps) / float(self._job.total_steps), 4)
+                if self._job.total_steps
+                else 0.0
+            )
+            self._job.epochs_remaining = (
+                round(max(float(self._job.total_steps) - float(self._job.current_epoch), 0.0), 4)
+                if self._job.total_steps
+                else None
+            )
+            self._persist_status()
 
     def status_payload(self) -> dict[str, Any]:
         with self._lock:
@@ -408,6 +519,13 @@ class SpaceTrainingManager:
                 reward_curve_csv=None,
                 model_repo_id=os.getenv("HF_MODEL_REPO_ID"),
                 uploaded_revision=None,
+                phase="queued",
+                completed_steps=0,
+                total_steps=int(config.max_steps),
+                remaining_steps=int(config.max_steps),
+                current_epoch=0.0,
+                epochs_remaining=float(config.max_steps),
+                progress_ratio=0.0,
                 error=None,
                 traceback=None,
             )
@@ -446,7 +564,7 @@ class SpaceTrainingManager:
 
     def _run_training_job(self, run_id: str, config: TrainingConfig) -> None:
         try:
-            summary = run_training(config)
+            summary = run_training(config, progress_callback=self._update_progress)
             artifact_path = summary["output_dir"]
             uploaded_revision = self._upload_artifacts(artifact_path, run_id)
             self.model_registry.load_latest_from_hub()
@@ -458,6 +576,15 @@ class SpaceTrainingManager:
                 self._job.reward_curve_csv = summary.get("reward_curve_csv")
                 self._job.model_repo_id = os.getenv("HF_MODEL_REPO_ID")
                 self._job.uploaded_revision = uploaded_revision
+                self._job.phase = "completed"
+                self._job.completed_steps = int(summary.get("completed_steps", config.max_steps))
+                self._job.total_steps = int(config.max_steps)
+                self._job.remaining_steps = 0
+                self._job.progress_ratio = 1.0 if self._job.total_steps else 0.0
+                self._job.current_epoch = float(summary.get("completed_steps", config.max_steps))
+                self._job.epochs_remaining = 0.0
+                self._job.baseline_summary = summary.get("baseline_summary", {})
+                self._job.trained_summary = summary.get("trained_summary", {})
                 self._job.error = None
                 self._job.traceback = None
                 self._persist_status()

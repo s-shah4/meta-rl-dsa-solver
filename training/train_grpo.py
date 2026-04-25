@@ -6,7 +6,7 @@ import json
 import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from env.adapt_env import AdaptEnvironment, MAX_STEPS_PER_EPISODE
 from env.generator import DIFFICULTY_LABELS, GeneratorAgent
@@ -411,6 +411,7 @@ def build_reward_func(
     curriculum: CurriculumManager,
     controller: GeneratorController,
     logger: TrainingLogger,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ):
     def reward_func(prompts, completions, **kwargs) -> list[float]:
         del kwargs
@@ -454,6 +455,21 @@ def build_reward_func(
                     "problem_id": problem["problem_id"],
                 },
             )
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "train",
+                        "train_episode_index": int(controller.history["episode_index"]),
+                        "curriculum_level": int(curriculum.current_level()),
+                        "current_difficulty": curriculum.current_difficulty(),
+                        "last_problem_id": problem["problem_id"],
+                        "last_problem_family": problem["problem_type"],
+                        "last_pass_rate": round(float(observation.pass_rate), 4),
+                        "last_visible_pass_rate": round(float(observation.visible_pass_rate), 4),
+                        "last_reward": round(float(observation.reward), 4),
+                        "last_execution_status": observation.execution_status,
+                    }
+                )
             if controller.mode == "reward_aware" and controller.history["episode_index"] % 50 == 0:
                 print("[family_productivity]", json.dumps(controller.productivity_snapshot()))
 
@@ -596,13 +612,18 @@ def print_evaluation_summary(baseline: dict[str, Any], trained: dict[str, Any]) 
         print(f"{tier:<12} {baseline.get(tier, 0.0):>10.3f} {trained.get(tier, 0.0):>10.3f}")
 
 
-def run_training(config: TrainingConfig | argparse.Namespace) -> dict[str, Any]:
+def run_training(
+    config: TrainingConfig | argparse.Namespace,
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     if isinstance(config, argparse.Namespace):
         config = namespace_to_config(config)
 
     try:
         from trl import GRPOConfig, GRPOTrainer
         from unsloth import FastLanguageModel, PatchFastRL
+        from transformers import TrainerCallback
     except ImportError as exc:
         raise RuntimeError(
             "Training dependencies are missing. Install `trl` and `unsloth` before running GRPO training."
@@ -647,6 +668,15 @@ def run_training(config: TrainingConfig | argparse.Namespace) -> dict[str, Any]:
 
     if config.baseline_eval:
         FastLanguageModel.for_inference(model)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "baseline_eval",
+                    "status": "running",
+                    "completed_steps": 0,
+                    "total_steps": int(config.max_steps),
+                }
+            )
         baseline_summary = run_policy_evaluation(
             model=model,
             tokenizer=tokenizer,
@@ -658,6 +688,14 @@ def run_training(config: TrainingConfig | argparse.Namespace) -> dict[str, Any]:
             max_new_tokens=config.eval_max_new_tokens,
         )
         print(f"[baseline_eval] {json.dumps(baseline_summary)}")
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "baseline_eval",
+                    "status": "completed",
+                    "baseline_summary": baseline_summary,
+                }
+            )
 
     training_args = GRPOConfig(
         output_dir=str(output_dir),
@@ -673,11 +711,52 @@ def run_training(config: TrainingConfig | argparse.Namespace) -> dict[str, Any]:
         report_to=[],
     )
 
+    class ProgressCallback(TrainerCallback):
+        def on_train_begin(self, args, state, control, **kwargs):  # type: ignore[override]
+            del args, control, kwargs
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "train",
+                        "status": "running",
+                        "completed_steps": int(getattr(state, "global_step", 0)),
+                        "total_steps": int(config.max_steps),
+                        "current_epoch": float(getattr(state, "epoch", 0.0) or 0.0),
+                    }
+                )
+
+        def on_step_end(self, args, state, control, **kwargs):  # type: ignore[override]
+            del args, control, kwargs
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "train",
+                        "status": "running",
+                        "completed_steps": int(getattr(state, "global_step", 0)),
+                        "total_steps": int(config.max_steps),
+                        "current_epoch": float(getattr(state, "epoch", 0.0) or 0.0),
+                    }
+                )
+
+        def on_train_end(self, args, state, control, **kwargs):  # type: ignore[override]
+            del args, control, kwargs
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "train",
+                        "status": "completed",
+                        "completed_steps": int(getattr(state, "global_step", 0)),
+                        "total_steps": int(config.max_steps),
+                        "current_epoch": float(getattr(state, "epoch", 0.0) or 0.0),
+                    }
+                )
+
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=[build_reward_func(curriculum, controller, logger)],
+        reward_funcs=[build_reward_func(curriculum, controller, logger, progress_callback)],
         args=training_args,
         train_dataset=build_dataset(config.dataset_size, controller, curriculum),
+        callbacks=[ProgressCallback()],
     )
     trainer.train()
 
@@ -686,6 +765,15 @@ def run_training(config: TrainingConfig | argparse.Namespace) -> dict[str, Any]:
 
     if config.baseline_eval:
         FastLanguageModel.for_inference(model)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "trained_eval",
+                    "status": "running",
+                    "completed_steps": int(config.max_steps),
+                    "total_steps": int(config.max_steps),
+                }
+            )
         trained_summary = run_policy_evaluation(
             model=model,
             tokenizer=tokenizer,
@@ -698,6 +786,14 @@ def run_training(config: TrainingConfig | argparse.Namespace) -> dict[str, Any]:
         )
         print(f"[trained_eval] {json.dumps(trained_summary)}")
         print_evaluation_summary(baseline_summary, trained_summary)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "trained_eval",
+                    "status": "completed",
+                    "trained_summary": trained_summary,
+                }
+            )
 
     csv_path = logger.write_csv()
     logger.close()
@@ -709,6 +805,7 @@ def run_training(config: TrainingConfig | argparse.Namespace) -> dict[str, Any]:
         "reward_curve_csv": str(csv_path.resolve()),
         "baseline_summary": baseline_summary,
         "trained_summary": trained_summary,
+        "completed_steps": int(config.max_steps),
     }
 
 

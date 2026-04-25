@@ -29,6 +29,9 @@ def main() -> None:
     train_status = client.get("/train/status")
     assert train_status.status_code == 200
     assert "status" in train_status.json()
+    assert "completed_steps" in train_status.json()
+    assert "remaining_steps" in train_status.json()
+    assert "phase" in train_status.json()
 
     reset = client.post("/reset", json={"difficulty": "easy", "problem_id": "sum_even_numbers"})
     assert reset.status_code == 200
@@ -50,16 +53,6 @@ def main() -> None:
 
     no_model = client.post("/run-trained-policy", json={"difficulty": "easy"})
     assert no_model.status_code == 409
-
-    no_model_generate = client.post(
-        "/generate-code",
-        json={
-            "problem": "Given n integers, print the sum of the even ones.",
-            "input_format": "The first line contains n. The second line contains n space-separated integers.",
-            "constraints": "1 <= n <= 100",
-        },
-    )
-    assert no_model_generate.status_code == 409
 
     with patch.object(
         server_app.TRAINING_MANAGER,
