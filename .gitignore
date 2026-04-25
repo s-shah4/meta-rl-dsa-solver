@@ -220,3 +220,6 @@ __marimo__/
 
 .idea/
 *.iml
+
+# local codebase maps
+CODEBASE_STRUCTURE_MAIN_V5.md
