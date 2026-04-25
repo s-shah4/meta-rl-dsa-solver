@@ -1,127 +1,166 @@
-# meta-rl-dsa-solver
+---
+title: ADAPT DSA Tutor OpenEnv
+sdk: docker
+pinned: false
+app_port: 7860
+base_path: /web
+tags:
+  - openenv
+  - reinforcement-learning
+  - code-generation
+---
 
-ADAPT (Adversarial DSA Tutor) is a minimal reinforcement learning environment for DSA code-generation tasks.
+# ADAPT DSA Tutor OpenEnv
 
-The current implementation is V1: direct Python usage, no FastAPI, multiple test cases, hidden tests, subprocess execution, and verifier-based rewards.
+ADAPT, the Adversarial DSA Tutor, is an OpenEnv-compliant RLVR environment for training code-generation agents on small DSA tasks. The agent receives a problem prompt, examples, and visible tests, then submits Python code. The environment runs the code against visible and hidden tests and returns reward, pass-rate metrics, execution status, and feedback.
 
-## Usage
+This repo now focuses on the environment layer only. Verifier work and training scripts are owned separately.
 
-```python
-from env.adapt_env import AdaptEnv
+## Why This Environment
 
-env = AdaptEnv()
-
-obs = env.reset()
-result = env.step("n=int(input())\nprint(n*2)")
-
-reward = result["reward"]
-```
-
-Flow:
+The hackathon asks for OpenEnv environments that can improve LLM behavior through verifiable interaction. ADAPT targets a simple but useful skill loop:
 
 ```text
-model -> generates code -> env.step(code) -> executor runs code -> verifier evaluates -> env returns result
+agent writes code -> environment executes it -> hidden tests and reward signals score it -> trainer improves the agent
 ```
 
-## Files
+The differentiator is curriculum-ready DSA practice: each episode carries a problem id and difficulty tier so training can track per-tier success instead of only aggregate reward.
 
-- `env/adapt_env.py`: reset/step orchestration only
-- `env/executor.py`: subprocess execution with a 2 second timeout
-- `env/test_cases.py`: problem definition plus visible and hidden test cases
+## OpenEnv Interface
+
+The environment uses the latest OpenEnv API shape:
+
+- `AdaptEnvironment(Environment[AdaptAction, AdaptObservation, AdaptState])`
+- `reset()` returns a typed observation.
+- `step(action)` accepts an `AdaptAction` with a Python `code` string.
+- `state` exposes episode id, step count, current problem id, difficulty, and recent metrics.
+
+`openenv.yaml` points to:
+
+```yaml
+app: server.app:app
+port: 7860
+```
+
+## Action
+
+```python
+{
+    "code": "n = int(input())\nprint(n * 2)"
+}
+```
 
 ## Observation
 
-`reset()` returns:
+Reset and step observations include:
 
-```python
-{
-    "problem": str,
-    "input_format": str,
-    "constraints": str,
-    "examples": list,
-    "visible_tests": list,
-}
-```
+- problem statement
+- input format
+- constraints
+- examples
+- visible tests
+- problem id
+- difficulty tier
+- feedback
+- pass rate, visible pass rate, and hidden pass rate
+- syntax/runtime/timeout status
+- reward components
 
-Hidden tests are kept inside the environment and are not shown in the observation.
+Hidden test inputs and expected outputs are never returned in observations.
 
-## Step Result
+## Reward
 
-`step(code)` returns:
+Reward is clipped to `[0.0, 1.0]` and combines multiple environment-level signals:
 
-```python
-{
-    "reward": float,
-    "done": bool,
-    "feedback": str,
-    "pass_rate": float,
-}
-```
+- correctness from visible and hidden pass rate
+- syntax validity
+- clean execution
+- output format compliance
+- timeout penalty
+- runtime error penalty
+- static safety rejection for dangerous imports such as `os`, `subprocess`, `socket`, `pathlib`, and `shutil`
 
-## Verifier Requirement
+If `verifier.verifier.verify(code, test_cases)` exists, the environment can use it as an optional reward augmentation. If the verifier is absent, the environment still works using executor-derived reward.
 
-`env.step(code)` calls:
+## Local Setup
 
-```python
-from verifier.verifier import verify
-
-reward, metadata = verify(code, test_cases)
-```
-
-The verifier should return:
-
-```python
-(
-    1.0,
-    {
-        "pass_rate": 1.0,
-        "feedback": "All tests passed. Pass rate: 1.00",
-    },
-)
-```
-
-If `metadata` does not include `pass_rate` or `feedback`, the environment computes fallback values from executor results.
-
-## Smoke Checks
-
-From this directory:
+Use Python `3.10+`.
 
 ```powershell
 cd C:\Users\kaust\PycharmProjects\meta-rl-dsa-solver
+python -m venv .venv
+.\.venv\Scripts\pip install -e .
 ```
 
-Check reset and visible/hidden split:
+For this local machine, the existing checked-out OpenEnv repo can also be used during development:
 
 ```powershell
-python -B -c "from env.adapt_env import AdaptEnv; env=AdaptEnv(); print(env.reset()); print(len(env.visible_tests), len(env.hidden_tests))"
+$env:PYTHONPATH="C:\Users\kaust\PycharmProjects\OpenEnv\src;$PWD"
 ```
 
-Expected split:
+## Smoke Tests
 
-```text
-3 5
-```
-
-Check executor directly:
+Run the local smoke test:
 
 ```powershell
-python -B -c "from env.executor import run_code; print(run_code('n=int(input())\nprint(n*2)', '5\n'))"
+python test.py
 ```
 
-Expected output:
-
-```python
-{'stdout': '10\n', 'stderr': '', 'exit_code': 0}
-```
-
-Once `verifier/verifier.py` exists, check the full environment:
+Check syntax:
 
 ```powershell
-python -B -c "from env.adapt_env import AdaptEnv; env=AdaptEnv(); env.reset(); print(env.step('n=int(input())\nprint(n*2)'))"
+python -m py_compile models.py env\adapt_env.py env\executor.py env\test_cases.py server\app.py
 ```
 
-Check a wrong answer:
+Start the OpenEnv server:
 
 ```powershell
-python -B -c "from env.adapt_env import AdaptEnv; env=AdaptEnv(); env.reset(); print(env.step('n=int(input())\nprint(n+2)'))"
+uvicorn server.app:app --host 0.0.0.0 --port 7860
 ```
+
+Useful endpoints:
+
+- `GET /health`
+- `GET /schema`
+- `POST /reset`
+- `POST /step`
+- `GET /state`
+
+Example step request:
+
+```powershell
+curl -X POST http://localhost:7860/step -H "Content-Type: application/json" -d "{\"action\":{\"code\":\"n=int(input())\nprint(n*2)\"}}"
+```
+
+Validate with OpenEnv once dependencies are installed:
+
+```powershell
+openenv validate .
+```
+
+## Hugging Face Spaces
+
+This repo is Docker Space ready:
+
+```powershell
+openenv push --repo-id <your-hf-username>/adapt-dsa-tutor
+```
+
+Before final submission, add:
+
+- live Hugging Face Space link
+- training reward/loss plots from Disha's run
+- before/after code example showing a problem the model failed before training and solved after training
+- mini-blog or short video link
+
+## Current Problem Bank
+
+The environment includes a lightweight curated bank:
+
+- `easy_double`
+- `easy_sum_two`
+- `medium_maximum`
+- `medium_count_even`
+- `hard_reverse_words`
+
+This is intentionally small for submission-minimum stability. Later work can expand it to 30-50 tiered problems without changing the OpenEnv API.
