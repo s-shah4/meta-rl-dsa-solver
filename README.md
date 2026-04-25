@@ -1,81 +1,127 @@
 # meta-rl-dsa-solver
 
-ADAPT (Adversarial DSA Tutor) is a minimal reinforcement learning environment for coding tasks. The current V0 environment is a pure Python class with no API dependency, so it can be used directly from a training loop with `env.reset()` and `env.step(...)`.
+ADAPT (Adversarial DSA Tutor) is a minimal reinforcement learning environment for DSA code-generation tasks.
 
-## Current V0
+The current implementation is V1: direct Python usage, no FastAPI, multiple test cases, hidden tests, subprocess execution, and verifier-based rewards.
 
-- Fixed DSA problem: given an integer `n`, return `n * 2`
-- Single test input: `5`
-- Expected output: `10`
-- Binary reward: `1.0` for correct output, `0.0` otherwise
-- Subprocess execution with a 2 second timeout
-
-## Run a Smoke Test
-
-From this directory:
-
-```powershell
-cd C:\Users\kaust\PycharmProjects\meta-rl-dsa-solver
-python3 -c "from environment import AdaptEnv; env=AdaptEnv(); print(env.reset()); print(env.step('n=int(input()); print(n*2)'))"
-```
-
-Expected reward:
-
-```text
-1.0
-```
-
-## Use in Python
+## Usage
 
 ```python
-from environment import AdaptEnv
+from env.adapt_env import AdaptEnv
 
 env = AdaptEnv()
 
 obs = env.reset()
-print(obs)
+result = env.step("n=int(input())\nprint(n*2)")
 
-code = "n=int(input()); print(n*2)"
-result = env.step(code)
-
-print(result)
-assert result["reward"] == 1.0
+reward = result["reward"]
 ```
 
-## Check Failure Cases
+Flow:
 
-Wrong answer:
-
-```powershell
-python3 -c "from environment import AdaptEnv; env=AdaptEnv(); env.reset(); print(env.step('print(0)'))"
+```text
+model -> generates code -> env.step(code) -> executor runs code -> verifier evaluates -> env returns result
 ```
 
-Timeout:
+## Files
 
-```powershell
-python3 -c "from environment import AdaptEnv; env=AdaptEnv(); env.reset(); print(env.step('while True: pass'))"
-```
+- `env/adapt_env.py`: reset/step orchestration only
+- `env/executor.py`: subprocess execution with a 2 second timeout
+- `env/test_cases.py`: problem definition plus visible and hidden test cases
 
-## Environment Contract
+## Observation
 
 `reset()` returns:
 
 ```python
 {
-    "problem": "Given an integer n, return n * 2",
-    "input": "5",
+    "problem": str,
+    "input_format": str,
+    "constraints": str,
+    "examples": list,
+    "visible_tests": list,
 }
 ```
 
-`step(action: str)` returns:
+Hidden tests are kept inside the environment and are not shown in the observation.
+
+## Step Result
+
+`step(code)` returns:
 
 ```python
 {
-    "observation": "<program output or error>",
-    "reward": 1.0,
-    "done": True,
-    "info": {},
+    "reward": float,
+    "done": bool,
+    "feedback": str,
+    "pass_rate": float,
 }
 ```
 
-The implementation keeps the verifier pluggable so later versions can replace the single expected-output check with hidden tests, randomized inputs, or adaptive curriculum logic.
+## Verifier Requirement
+
+`env.step(code)` calls:
+
+```python
+from verifier.verifier import verify
+
+reward, metadata = verify(code, test_cases)
+```
+
+The verifier should return:
+
+```python
+(
+    1.0,
+    {
+        "pass_rate": 1.0,
+        "feedback": "All tests passed. Pass rate: 1.00",
+    },
+)
+```
+
+If `metadata` does not include `pass_rate` or `feedback`, the environment computes fallback values from executor results.
+
+## Smoke Checks
+
+From this directory:
+
+```powershell
+cd C:\Users\kaust\PycharmProjects\meta-rl-dsa-solver
+```
+
+Check reset and visible/hidden split:
+
+```powershell
+python -B -c "from env.adapt_env import AdaptEnv; env=AdaptEnv(); print(env.reset()); print(len(env.visible_tests), len(env.hidden_tests))"
+```
+
+Expected split:
+
+```text
+3 5
+```
+
+Check executor directly:
+
+```powershell
+python -B -c "from env.executor import run_code; print(run_code('n=int(input())\nprint(n*2)', '5\n'))"
+```
+
+Expected output:
+
+```python
+{'stdout': '10\n', 'stderr': '', 'exit_code': 0}
+```
+
+Once `verifier/verifier.py` exists, check the full environment:
+
+```powershell
+python -B -c "from env.adapt_env import AdaptEnv; env=AdaptEnv(); env.reset(); print(env.step('n=int(input())\nprint(n*2)'))"
+```
+
+Check a wrong answer:
+
+```powershell
+python -B -c "from env.adapt_env import AdaptEnv; env=AdaptEnv(); env.reset(); print(env.step('n=int(input())\nprint(n+2)'))"
+```
