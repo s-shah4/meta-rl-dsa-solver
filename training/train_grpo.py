@@ -161,6 +161,14 @@ def extract_code(completion: str) -> str:
     return text
 
 
+def extract_code_for_execution(completion: str) -> str:
+    extracted = extract_code(completion)
+    if extracted.strip():
+        return extracted
+    # Empty generations should count as bad samples, not crash the whole run.
+    return "pass"
+
+
 def format_examples(problem: dict[str, Any]) -> str:
     visible_cases = [test_case for test_case in problem.get("test_cases", []) if test_case.get("is_visible", False)]
     if not visible_cases:
@@ -640,6 +648,7 @@ def build_reward_func(
         rewards: list[float] = []
 
         for prompt, completion in zip(prompts, completions):
+            extracted_code = extract_code_for_execution(completion)
             problem = controller.resolve_prompt(prompt)
             env = AdaptEnvironment(generator=controller.generator, generator_mode=controller.mode)
             env.reset(
@@ -651,7 +660,7 @@ def build_reward_func(
             observation = env.step(
                 AdaptAction(
                     session_id=env.session_id,
-                    code=extract_code(completion),
+                    code=extracted_code,
                 )
             )
             rewards.append(float(observation.reward))
@@ -677,7 +686,7 @@ def build_reward_func(
                     "problem_id": problem["problem_id"],
                     "teacher_prompt": prompt,
                     "solver_completion": completion,
-                    "extracted_code": extract_code(completion),
+                    "extracted_code": extracted_code,
                     "feedback": observation.feedback,
                     "efficiency_score": observation.reward_components.get("efficiency_score"),
                     "optimization_hints": extract_optimization_hints(observation.feedback),
