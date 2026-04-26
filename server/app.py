@@ -99,7 +99,6 @@ class GenerateCodeRequest(BaseModel):
     attempt_number: int = 1
     max_steps: int = 1
     max_new_tokens: int = 512
-    target_model: str = "current"
 
 
 def _metadata() -> dict[str, Any]:
@@ -254,7 +253,6 @@ def generate_code(request: GenerateCodeRequest) -> dict[str, Any]:
             attempt_number=request.attempt_number,
             max_steps=request.max_steps,
             max_new_tokens=request.max_new_tokens,
-            target_model=request.target_model,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -49,15 +49,6 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _safe_float(value: Any) -> float | None:
-    try:
-        if value is None:
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 @dataclass
 class ModelState:
     loaded: bool = False
@@ -233,28 +224,13 @@ class SpaceModelRegistry:
 
     def _base_generation_stack(self) -> tuple[Any, Any, dict[str, Any]]:
         try:
-            self.load_base_model()
+            base_state = self.load_base_model()
         except Exception as exc:
             raise RuntimeError(f"Base model load failed: {exc}") from exc
         with self._lock:
             if self._base_model is None or self._base_tokenizer is None:
                 raise RuntimeError("Base model could not be loaded for fallback generation.")
-            return self._base_model, self._base_tokenizer, self._base_status_payload()
-
-    def _base_status_payload(self) -> dict[str, Any]:
-        with self._lock:
-            payload = {
-                "loaded": self._base_model is not None and self._base_tokenizer is not None,
-                "active_model_kind": "base",
-                "source_repo_id": self._state.source_repo_id,
-                "local_path": self._base_model_name(),
-                "revision": None,
-                "base_model_name": self._base_model_name(),
-                "loaded_at": _iso_or_none(self._state.loaded_at),
-                "error": None,
-                "cache_dir": str(self.cache_dir),
-            }
-        return payload
+            return self._base_model, self._base_tokenizer, base_state
 
     def _generate_with_possible_base_fallback(
         self,
@@ -293,26 +269,6 @@ class SpaceModelRegistry:
                 return completion, fallback_state
             raise RuntimeError(f"Generation failed: {exc}") from exc
 
-    def _generate_with_stack(
-        self,
-        *,
-        prompt: str,
-        max_new_tokens: int,
-        model: Any,
-        tokenizer: Any,
-        model_state: dict[str, Any],
-    ) -> tuple[str, dict[str, Any]]:
-        try:
-            completion = generate_completion(
-                model=model,
-                tokenizer=tokenizer,
-                prompt=prompt,
-                max_new_tokens=max_new_tokens,
-            )
-        except Exception as exc:
-            raise RuntimeError(f"Generation failed: {exc}") from exc
-        return completion, model_state
-
     def load_base_model(self) -> dict[str, Any]:
         torch, _, model_components = self._require_runtime_dependencies()
         AutoModelForCausalLM, AutoTokenizer = model_components
@@ -320,15 +276,12 @@ class SpaceModelRegistry:
 
         with self._lock:
             if self._base_model is not None and self._base_tokenizer is not None:
-                if self._model is None or self._tokenizer is None:
-                    self._set_state(
-                        base_model_name=base_model_name,
-                        active_model_kind="base",
-                        loaded=True,
-                        error=None,
-                    )
-                else:
-                    self._set_state(base_model_name=base_model_name, error=None)
+                self._set_state(
+                    base_model_name=base_model_name,
+                    active_model_kind="base",
+                    loaded=True,
+                    error=None,
+                )
                 return self.status_payload()
 
             if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
@@ -356,18 +309,15 @@ class SpaceModelRegistry:
                 model.eval()
             self._base_model = model
             self._base_tokenizer = tokenizer
-            if self._model is None or self._tokenizer is None:
-                self._set_state(
-                    loaded=True,
-                    active_model_kind="base",
-                    base_model_name=base_model_name,
-                    local_path=base_model_name,
-                    revision=None,
-                    loaded_at=_utc_now(),
-                    error=None,
-                )
-            else:
-                self._set_state(base_model_name=base_model_name, error=None)
+            self._set_state(
+                loaded=True,
+                active_model_kind="base",
+                base_model_name=base_model_name,
+                local_path=base_model_name,
+                revision=None,
+                loaded_at=_utc_now(),
+                error=None,
+            )
             return self.status_payload()
 
     def load_from_local(
@@ -566,7 +516,6 @@ class SpaceModelRegistry:
         attempt_number: int = 1,
         max_steps: int = 1,
         max_new_tokens: int = 512,
-        target_model: str = "current",
     ) -> dict[str, Any]:
         prompt = build_solver_prompt(
             {
@@ -581,30 +530,11 @@ class SpaceModelRegistry:
                 "feedback": feedback or "No previous attempt yet. Solve the problem directly.",
             }
         )
-        if target_model == "base":
-            model, tokenizer, model_state = self._base_generation_stack()
-            completion, model_state = self._generate_with_stack(
-                prompt=prompt,
-                max_new_tokens=max_new_tokens,
-                model=model,
-                tokenizer=tokenizer,
-                model_state=model_state,
-            )
-        elif target_model == "trained":
-            model, tokenizer, model_state = self._active_generation_stack(allow_base_fallback=False)
-            completion, model_state = self._generate_with_stack(
-                prompt=prompt,
-                max_new_tokens=max_new_tokens,
-                model=model,
-                tokenizer=tokenizer,
-                model_state=model_state,
-            )
-        else:
-            completion, model_state = self._generate_with_possible_base_fallback(
-                prompt=prompt,
-                max_new_tokens=max_new_tokens,
-                allow_base_fallback=True,
-            )
+        completion, model_state = self._generate_with_possible_base_fallback(
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            allow_base_fallback=True,
+        )
         return {
             "problem_id": problem_id,
             "problem_type": problem_type,
@@ -614,8 +544,6 @@ class SpaceModelRegistry:
             "code": extract_code(completion),
             "model": model_state,
             "system_prompt": SYSTEM_PROMPT,
-            "requested_model": target_model,
-            "effective_model": model_state.get("active_model_kind", "unavailable"),
         }
 
 
@@ -713,95 +641,13 @@ class SpaceTrainingManager:
             )
             self._persist_status()
 
-    def _read_json_file(self, path: str | Path | None) -> dict[str, Any] | None:
-        if not path:
-            return None
-        candidate = Path(path)
-        if not candidate.exists():
-            return None
-        try:
-            payload = json.loads(candidate.read_text(encoding="utf-8"))
-        except Exception:
-            return None
-        return payload if isinstance(payload, dict) else None
-
-    def _find_latest_run_summary(self) -> dict[str, Any] | None:
-        current_summary = self._read_json_file(self._job.run_summary_path)
-        if current_summary is not None:
-            return current_summary
-
-        latest_summary: dict[str, Any] | None = None
-        latest_mtime = -1.0
-        for candidate in self.runs_dir.glob("**/logs/run_summary.json"):
-            try:
-                mtime = candidate.stat().st_mtime
-            except OSError:
-                continue
-            if mtime <= latest_mtime:
-                continue
-            payload = self._read_json_file(candidate)
-            if payload is None:
-                continue
-            latest_summary = payload
-            latest_mtime = mtime
-        return latest_summary
-
-    def _demo_metrics_payload(self) -> dict[str, Any]:
-        with self._lock:
-            baseline_summary = dict(self._job.baseline_summary)
-            trained_summary = dict(self._job.trained_summary)
-            training_status = self._job.status
-            phase = self._job.phase
-            progress_ratio = float(self._job.progress_ratio or 0.0)
-            completed_steps = int(self._job.completed_steps or 0)
-            total_steps = int(self._job.total_steps or 0)
-
-        run_summary = self._find_latest_run_summary() or {}
-        final_metrics = run_summary.get("final_metrics", {}) if isinstance(run_summary.get("final_metrics"), dict) else {}
-        rolling_metrics = (
-            run_summary.get("rolling_metrics", {}) if isinstance(run_summary.get("rolling_metrics"), dict) else {}
-        )
-        final_trained_summary = (
-            final_metrics.get("trained_summary", {}) if isinstance(final_metrics.get("trained_summary"), dict) else {}
-        )
-        final_baseline_summary = (
-            final_metrics.get("baseline_summary", {}) if isinstance(final_metrics.get("baseline_summary"), dict) else {}
-        )
-
-        trained_overall = _safe_float(trained_summary.get("overall"))
-        baseline_overall = _safe_float(baseline_summary.get("overall"))
-        if trained_overall is None:
-            trained_overall = _safe_float(final_trained_summary.get("overall"))
-        if baseline_overall is None:
-            baseline_overall = _safe_float(final_baseline_summary.get("overall"))
-
-        live_pass_rate = _safe_float(rolling_metrics.get("avg_pass_rate"))
-        overall_accuracy = trained_overall
-        metric_source = "trained_eval" if overall_accuracy is not None else "unavailable"
-        if overall_accuracy is None and live_pass_rate is not None:
-            overall_accuracy = live_pass_rate
-            metric_source = "rolling_pass_rate"
-
-        return {
-            "overall_accuracy": overall_accuracy,
-            "baseline_accuracy": baseline_overall,
-            "live_pass_rate": live_pass_rate,
-            "training_status": training_status,
-            "phase": phase,
-            "progress_ratio": round(progress_ratio, 4),
-            "completed_steps": completed_steps,
-            "total_steps": total_steps,
-            "metric_source": metric_source,
-        }
-
     def status_payload(self) -> dict[str, Any]:
         with self._lock:
             payload = self._job.to_dict()
             payload["output_root"] = str(self.output_root)
             payload["status_file"] = str(self.status_file)
             payload["active"] = payload["status"] == "running"
-        payload["demo_metrics"] = self._demo_metrics_payload()
-        return payload
+            return payload
 
     def model_status_payload(self) -> dict[str, Any]:
         return self.model_registry.status_payload()
@@ -1048,7 +894,6 @@ class SpaceTrainingManager:
         attempt_number: int = 1,
         max_steps: int = 1,
         max_new_tokens: int = 512,
-        target_model: str = "current",
     ) -> dict[str, Any]:
         return self.model_registry.generate_code(
             problem=problem,
@@ -1061,5 +906,4 @@ class SpaceTrainingManager:
             attempt_number=attempt_number,
             max_steps=max_steps,
             max_new_tokens=max_new_tokens,
-            target_model=target_model,
         )
