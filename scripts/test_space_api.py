@@ -19,8 +19,8 @@ def main() -> None:
 
     root = client.get("/")
     assert root.status_code == 200
-    assert "training" in root.json()
-    assert "model" in root.json()
+    assert "text/html" in root.headers["content-type"]
+    assert "ADAPT Judge Demo" in root.text
 
     model_status = client.get("/model/status")
     assert model_status.status_code == 200
@@ -42,6 +42,30 @@ def main() -> None:
     assert "events_path" in train_status.json()
     assert "latest_checkpoint_path" in train_status.json()
     assert "logs_deleted_from_space" in train_status.json()
+    assert "overall_accuracy" in train_status.json()
+    assert "reward_curve" in train_status.json()
+
+    run_code = client.post(
+        "/run-code",
+        json={
+            "code": "data = input().strip()\nprint(data[::-1])",
+            "stdin": "adapt\n",
+        },
+    )
+    assert run_code.status_code == 200
+    assert run_code.json() == {"stdout": "tpada\n", "stderr": ""}
+
+    run_code_error = client.post(
+        "/run-code",
+        json={
+            "code": "raise ValueError('boom')",
+            "stdin": "",
+        },
+    )
+    assert run_code_error.status_code == 200
+    assert set(run_code_error.json().keys()) == {"stdout", "stderr"}
+    assert run_code_error.json()["stdout"] == ""
+    assert "ValueError: boom" in run_code_error.json()["stderr"]
 
     reset = client.post("/reset", json={"difficulty": "easy", "problem_id": "sum_even_numbers"})
     assert reset.status_code == 200
