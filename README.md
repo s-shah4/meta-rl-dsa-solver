@@ -354,6 +354,52 @@ This repo is designed to be hosted as an OpenEnv FastAPI Space.
 openenv push --repo-id <your-hf-username>/adapt-dsa-tutor
 ```
 
+### Quick test for the trained model
+
+You can call the live Space directly to test the trained code-generation model without cloning the repo locally. The inference endpoint is:
+
+```text
+POST https://Dishaaa25-meta-rl-dsa-solver.hf.space/generate-code
+```
+
+#### Example 1: Two Sum
+
+```bash
+curl -X POST "https://Dishaaa25-meta-rl-dsa-solver.hf.space/generate-code" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "problem": "Given an array of integers nums and an integer target, return the indices of the two numbers such that they add up to target. You may assume exactly one solution exists, and you may not use the same element twice. Print the two zero-based indices separated by a space.",
+    "input_format": "Line 1: integer n. Line 2: n space-separated integers nums[i]. Line 3: integer target.",
+    "constraints": "2 <= n <= 100000. -10^9 <= nums[i], target <= 10^9. Exactly one valid answer exists.",
+    "problem_id": "judge_two_sum",
+    "problem_type": "array_hashing",
+    "difficulty": "medium",
+    "attempt_number": 1,
+    "max_steps": 1,
+    "max_new_tokens": 512
+  }'
+```
+
+#### Example 2: Group Anagrams
+
+```bash
+curl -X POST "https://Dishaaa25-meta-rl-dsa-solver.hf.space/generate-code" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "problem": "Given a list of lowercase strings, group the anagrams together. Print one group per line. Within each group, print the words in sorted order separated by spaces. Print the groups ordered by the first word in each sorted group.",
+    "input_format": "Line 1: integer n. Next n lines: one lowercase string per line.",
+    "constraints": "1 <= n <= 10000. Each string length is between 1 and 100. Strings contain only lowercase English letters.",
+    "problem_id": "judge_group_anagrams",
+    "problem_type": "hashing_strings",
+    "difficulty": "medium",
+    "attempt_number": 1,
+    "max_steps": 1,
+    "max_new_tokens": 512
+  }'
+```
+
+The response is JSON and includes the generated Python solution under the `code` field.
+
 ## Submission checklist
 
 - OpenEnv environment with `Environment`, `reset`, `step`, and `state`
