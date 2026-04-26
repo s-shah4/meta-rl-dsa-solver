@@ -7,3 +7,4 @@ huggingface_hub>=0.34.0,<0.36
 datasets>=2.18.0
 transformers>=4.51.3,<5.7
 peft>=0.18.0,<0.20
+unsloth==2026.3.5

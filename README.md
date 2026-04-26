@@ -15,6 +15,17 @@ tags:
 
 LLMs are getting better at one-shot code generation, but they still struggle with the thing real engineers do all day: read feedback, debug, and repair. ADAPT closes that gap by turning algorithm practice into a self-repair RL environment where the model must improve over multiple attempts instead of guessing once.
 
+## Submission links
+
+- Hugging Face Space: [Dishaaa25/meta-rl-dsa-solver](https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver)
+- Live environment: [Dishaaa25-meta-rl-dsa-solver.hf.space](https://Dishaaa25-meta-rl-dsa-solver.hf.space)
+- Training repo URL: [Space repository root](https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/tree/main)
+- Training script: [training/train_grpo.py](https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/blob/main/training/train_grpo.py)
+- Training evidence: [TRAINING_EVIDENCE.md](https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/blob/main/TRAINING_EVIDENCE.md)
+- Mini blog / writeup: [BLOG.md](https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/blob/main/BLOG.md)
+- Trained adapter repo: [Dishaaa25/adapt-dsa-tutor-model](https://huggingface.co/Dishaaa25/adapt-dsa-tutor-model)
+- Source repo mirror: [s-shah4/meta-rl-dsa-solver](https://github.com/s-shah4/meta-rl-dsa-solver)
+
 ## Why ADAPT exists
 
 Most code-generation benchmarks test whether a model can land the answer immediately. They do not test whether the model can recover from partial failure, use examples productively, or adapt as the task distribution changes.
@@ -187,17 +198,70 @@ That makes ADAPT more than a static benchmark. The environment actively searches
 
 ## Results
 
-[INSERT: reward curve plot]
+We ran a real overnight GRPO training job on `Qwen/Qwen2.5-3B-Instruct` and logged `7,600` training episodes over `950` optimizer steps.
 
-[INSERT: baseline vs trained table]
+Training run:
 
-Recommended artifacts to include here:
+- Run ID: `15940d1d-7d8c-4253-8810-2ea934bedee4`
+- Started: `2026-04-25 22:21 UTC`
+- Finished: `2026-04-26 07:19 UTC`
+- Wall-clock time: `8.96 hours`
+- Train preset: `overnight`
+- Curriculum mode: `reward_aware`
+- Trained model revision: `6c957e7c6bdb25ff086775fb8692570aee4501c9`
 
-- reward curve from `training/reward_curve.csv`
-- `reward_curve.png`
-- `pass_rate_by_difficulty.png`
-- `family_productivity.png`
-- one before/after repair example from baseline vs trained evaluation
+Proof of learning from the actual run logs:
+
+- Average reward improved from `0.4441` in the first `500` episodes to `0.5951` in the last `500` episodes.
+- Average hidden pass rate improved from `0.4625` to `0.6488`.
+- Completion rate improved from `43.6%` to `59.6%`.
+
+Late-training performance over the final `500` episodes:
+
+| Difficulty | Episodes | Avg reward | Avg hidden pass rate | Completion rate |
+| --- | ---: | ---: | ---: | ---: |
+| Easy | 32 | 0.8390 | 0.8477 | 84.38% |
+| Medium | 104 | 0.7892 | 0.8425 | 78.85% |
+| Hard | 364 | 0.5182 | 0.5759 | 51.92% |
+
+### Reward curve
+
+![ADAPT reward curve](artifacts/reward_curve.svg)
+
+### Pass rate by difficulty
+
+![Pass rate by difficulty](artifacts/pass_rate_by_difficulty.svg)
+
+### Reward-aware family productivity
+
+![Family productivity](artifacts/family_productivity.svg)
+
+Top productive families near the end of training:
+
+- `smallest_most_frequent`
+- `merge_intervals`
+- `matrix_diagonal_sum`
+- `fizzbuzz_variant`
+- `group_anagrams_count`
+- `max_subarray_sum`
+- `two_sum_count`
+- `balanced_brackets`
+
+### A concrete improvement story
+
+This run did not include a separate baseline-eval sweep, so we do not claim a strict benchmark-style baseline-vs-trained score table. Instead, we show the model improving *inside the environment itself* over the same overnight run:
+
+- early training is dominated by low-reward, low-pass-rate episodes and safety failures
+- by the end of the run, the agent is regularly solving hard tasks like `reverse_words` with `reward=1.0`, `hidden pass rate=1.0`, and `efficiency score=1.0`
+
+The raw summary used for the table above is stored in `artifacts/results_summary.json`.
+
+For the hackathon submission form, the "Training Run Notebook URL" field can point to the public Hugging Face Space repository because this project trained directly on Hugging Face rather than from a separate Colab notebook. The repo includes:
+
+- the full training entrypoint in `training/train_grpo.py`
+- the recovered training evidence in `TRAINING_EVIDENCE.md`
+- embedded reward / pass-rate plots committed as image files
+- the lightweight structured summary in `artifacts/results_summary.json`
 
 ## How to run
 
@@ -302,7 +366,10 @@ openenv push --repo-id <your-hf-username>/adapt-dsa-tutor
 
 ## Links
 
-- HuggingFace Space URL: [HuggingFace Space URL]
-- Colab Training Notebook: [Colab Training Notebook]
-- HF Blog Post: [HF Blog Post]
-- YouTube Demo: [YouTube Demo]
+- Hugging Face Space URL: [https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver](https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver)
+- Live app URL: [https://Dishaaa25-meta-rl-dsa-solver.hf.space](https://Dishaaa25-meta-rl-dsa-solver.hf.space)
+- Training repo URL: [https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/tree/main](https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/tree/main)
+- Training script URL: [https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/blob/main/training/train_grpo.py](https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/blob/main/training/train_grpo.py)
+- Training evidence URL: [https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/blob/main/TRAINING_EVIDENCE.md](https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/blob/main/TRAINING_EVIDENCE.md)
+- Blog post URL: [https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/blob/main/BLOG.md](https://huggingface.co/spaces/Dishaaa25/meta-rl-dsa-solver/blob/main/BLOG.md)
+- Trained model URL: [https://huggingface.co/Dishaaa25/adapt-dsa-tutor-model](https://huggingface.co/Dishaaa25/adapt-dsa-tutor-model)

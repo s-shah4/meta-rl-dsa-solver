@@ -1,0 +1,46 @@
+{
+  "run_id": "15940d1d-7d8c-4253-8810-2ea934bedee4",
+  "episodes": 7600,
+  "train_steps_reported": 950,
+  "wall_clock_hours": 8.964,
+  "first_500": {
+    "avg_reward": 0.4441,
+    "avg_pass_rate": 0.4625,
+    "completion_rate": 0.436
+  },
+  "last_500": {
+    "avg_reward": 0.5951,
+    "avg_pass_rate": 0.6488,
+    "completion_rate": 0.596
+  },
+  "difficulty_last_500": {
+    "easy": {
+      "episodes": 32,
+      "avg_reward": 0.839,
+      "avg_pass_rate": 0.8477,
+      "completion_rate": 0.8438
+    },
+    "medium": {
+      "episodes": 104,
+      "avg_reward": 0.7892,
+      "avg_pass_rate": 0.8425,
+      "completion_rate": 0.7885
+    },
+    "hard": {
+      "episodes": 364,
+      "avg_reward": 0.5182,
+      "avg_pass_rate": 0.5759,
+      "completion_rate": 0.5192
+    }
+  },
+  "top_productive_families_final": [
+    "smallest_most_frequent",
+    "merge_intervals",
+    "matrix_diagonal_sum",
+    "fizzbuzz_variant",
+    "group_anagrams_count",
+    "max_subarray_sum",
+    "two_sum_count",
+    "balanced_brackets"
+  ]
+}

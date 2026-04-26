@@ -174,6 +174,32 @@ class SpaceModelRegistry:
             ) from exc
         return torch, AutoPeftModelForCausalLM, (AutoModelForCausalLM, AutoTokenizer)
 
+    def _load_with_unsloth(
+        self,
+        *,
+        model_name: str,
+        dtype: Any,
+        load_in_4bit: bool,
+        max_seq_length: int = 2048,
+    ) -> tuple[Any, Any] | None:
+        try:
+            from unsloth import FastLanguageModel
+        except ImportError:
+            return None
+
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=model_name,
+            max_seq_length=max_seq_length,
+            dtype=dtype,
+            load_in_4bit=load_in_4bit,
+        )
+        if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        if hasattr(FastLanguageModel, "for_inference"):
+            FastLanguageModel.for_inference(model)
+        model.eval()
+        return model, tokenizer
+
     def _base_model_name(self) -> str:
         return os.getenv("BASE_MODEL_NAME") or os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-3B-Instruct"
 
@@ -264,15 +290,23 @@ class SpaceModelRegistry:
                 dtype = torch.float16
             else:
                 dtype = torch.float32
-            tokenizer = AutoTokenizer.from_pretrained(base_model_name)
-            if tokenizer.pad_token is None and tokenizer.eos_token is not None:
-                tokenizer.pad_token = tokenizer.eos_token
-            model = AutoModelForCausalLM.from_pretrained(
-                base_model_name,
-                device_map="auto",
-                torch_dtype=dtype,
+            unsloth_stack = self._load_with_unsloth(
+                model_name=base_model_name,
+                dtype=dtype,
+                load_in_4bit=torch.cuda.is_available(),
             )
-            model.eval()
+            if unsloth_stack is not None:
+                model, tokenizer = unsloth_stack
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+                if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                model = AutoModelForCausalLM.from_pretrained(
+                    base_model_name,
+                    device_map="auto",
+                    torch_dtype=dtype,
+                )
+                model.eval()
             self._base_model = model
             self._base_tokenizer = tokenizer
             self._set_state(
@@ -307,17 +341,27 @@ class SpaceModelRegistry:
                 dtype = torch.float16
             else:
                 dtype = torch.float32
-            tokenizer = AutoTokenizer.from_pretrained(str(artifact_dir))
-            if tokenizer.pad_token is None and tokenizer.eos_token is not None:
-                tokenizer.pad_token = tokenizer.eos_token
-
             if (artifact_dir / "adapter_config.json").exists():
-                model = AutoPeftModelForCausalLM.from_pretrained(
-                    str(artifact_dir),
-                    device_map="auto",
-                    torch_dtype=dtype,
+                unsloth_stack = self._load_with_unsloth(
+                    model_name=str(artifact_dir),
+                    dtype=dtype,
+                    load_in_4bit=torch.cuda.is_available(),
                 )
+                if unsloth_stack is not None:
+                    model, tokenizer = unsloth_stack
+                else:
+                    tokenizer = AutoTokenizer.from_pretrained(str(artifact_dir))
+                    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+                        tokenizer.pad_token = tokenizer.eos_token
+                    model = AutoPeftModelForCausalLM.from_pretrained(
+                        str(artifact_dir),
+                        device_map="auto",
+                        torch_dtype=dtype,
+                    )
             else:
+                tokenizer = AutoTokenizer.from_pretrained(str(artifact_dir))
+                if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+                    tokenizer.pad_token = tokenizer.eos_token
                 model = AutoModelForCausalLM.from_pretrained(
                     str(artifact_dir),
                     device_map="auto",

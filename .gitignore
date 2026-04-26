@@ -223,3 +223,10 @@ __marimo__/
 
 # local codebase maps
 CODEBASE_STRUCTURE_MAIN_V5.md
+
+# recovered local-only artifacts
+artifacts/events.jsonl
+artifacts/reward_curve.csv
+artifacts/run_summary.json
+artifacts/test_plot.png
+artifacts/*.png
