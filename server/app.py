@@ -8,8 +8,10 @@ from uuid import uuid4
 import uvicorn
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response
+import gradio as gr
 from pydantic import BaseModel
 
+from env.app import demo as gradio_demo
 from env.adapt_env import AdaptEnvironment
 from env.test_cases import load_problem_bank
 from models import AdaptAction, AdaptObservation, AdaptState
@@ -159,12 +161,12 @@ def root() -> dict[str, Any]:
 
 @app.get("/web", include_in_schema=False)
 def web_root() -> RedirectResponse:
-    return RedirectResponse(url="/", status_code=307)
+    return RedirectResponse(url="/web/", status_code=307)
 
 
 @app.get("/web/", include_in_schema=False)
 def web_root_slash() -> RedirectResponse:
-    return RedirectResponse(url="/", status_code=307)
+    return RedirectResponse(url="/web/", status_code=307)
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -331,6 +333,9 @@ def state(session_id: str = Query(..., description="Session id returned from /re
     if not env.problem:
         env.reset(session_id=session_id)
     return env.state.model_dump()
+
+
+app = gr.mount_gradio_app(app, gradio_demo, path="/web")
 
 
 def main(host: Optional[str] = None, port: Optional[int] = None) -> None:
